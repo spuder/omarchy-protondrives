@@ -1,0 +1,220 @@
+#!/usr/bin/env python3
+"""Manage Proton Drive accounts: add, remove, pause, resume, list.
+
+State lives under ~/.config/omarchy-protondrive/:
+  accounts.json        list of {id, displayName, remote, mountPath}
+  <id>/rclone.conf      that account's own rclone config (never shared
+                        across accounts, so revoking or corrupting one
+                        can't touch another — see PLAN.md)
+
+`add` is meant to run inside a terminal (Service.qml's "Add account" button
+launches one) since Proton's login is interactive: SRP username/password,
+2FA, and the separate mailbox password, none of which has a browser hand-off
+to shell out to the way Dropbox's OAuth link does. It shells out to
+`rclone config create`, which prompts for all of that itself.
+
+Every write to accounts.json goes through _atomic_write_json: write to a
+sibling temp file, then os.replace over the target, and refuse a target that
+is a symlink first. Same reasoning as the CPU plugin's state-dir-safety
+test — this directory is trusted, so nothing here should follow a symlink
+planted in it.
+"""
+
+import argparse
+import json
+import os
+import stat
+import subprocess
+import sys
+from pathlib import Path
+
+STATE_HOME = Path.home() / ".config" / "omarchy-protondrive"
+ACCOUNTS_FILE = STATE_HOME / "accounts.json"
+MOUNT_ROOT = Path.home() / "ProtonDrive"
+UNIT_TEMPLATE = "omarchy-protondrive@{id}.service"
+VALID_ID = __import__("re").compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+
+
+def fail(message):
+    print(f"protondrive-accountctl: {message}", file=sys.stderr)
+    sys.exit(1)
+
+
+def ensure_private_dir(path):
+    if path.exists() and path.is_symlink():
+        fail(f"refusing to use a symlinked directory: {path}")
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(path, 0o700)
+
+
+def load_accounts():
+    if not ACCOUNTS_FILE.exists():
+        return []
+    if ACCOUNTS_FILE.is_symlink():
+        fail(f"refusing to read a symlinked accounts file: {ACCOUNTS_FILE}")
+    try:
+        with ACCOUNTS_FILE.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return []
+    accounts = data.get("accounts") if isinstance(data, dict) else None
+    return accounts if isinstance(accounts, list) else []
+
+
+def atomic_write_accounts(accounts):
+    ensure_private_dir(STATE_HOME)
+    if ACCOUNTS_FILE.exists() and ACCOUNTS_FILE.is_symlink():
+        fail(f"refusing to overwrite a symlinked accounts file: {ACCOUNTS_FILE}")
+    tmp = ACCOUNTS_FILE.with_suffix(".json.tmp")
+    with tmp.open("w", encoding="utf-8") as handle:
+        json.dump({"accounts": accounts}, handle, indent=2)
+        handle.write("\n")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, ACCOUNTS_FILE)
+
+
+def find_account(accounts, account_id):
+    for entry in accounts:
+        if entry.get("id") == account_id:
+            return entry
+    return None
+
+
+def cmd_list(args):
+    accounts = load_accounts()
+    if not accounts:
+        print("No accounts configured. Add one with: protondrive-accountctl add <id> [display name]")
+        return
+    for entry in accounts:
+        print(f"{entry.get('id')}\t{entry.get('displayName')}\t{entry.get('mountPath')}")
+
+
+def cmd_add(args):
+    account_id = args.id.strip().lower()
+    if not VALID_ID.match(account_id):
+        fail("id must be lowercase letters, digits, and hyphens, starting with a letter or digit")
+
+    accounts = load_accounts()
+    if find_account(accounts, account_id):
+        fail(f"account '{account_id}' already exists")
+
+    display_name = args.display_name or account_id.replace("-", " ").title()
+    account_dir = STATE_HOME / account_id
+    ensure_private_dir(account_dir)
+
+    mount_path = MOUNT_ROOT / display_name
+    mount_path.mkdir(parents=True, exist_ok=True)
+
+    config_path = account_dir / "rclone.conf"
+    accounts.append({
+        "id": account_id,
+        "displayName": display_name,
+        "remote": account_id,
+        "mountPath": str(mount_path),
+    })
+    atomic_write_accounts(accounts)
+
+    print(f"Registered '{account_id}' ({display_name}), mounting at {mount_path}")
+    print("Starting the interactive Proton Drive login (rclone config create)...")
+    print()
+
+    rclone = _require_rclone()
+    exit_code = subprocess.call([
+        rclone, "config", "create", account_id, "protondrive",
+        "--config", str(config_path),
+        "--non-interactive=false",
+    ])
+    if exit_code != 0:
+        print()
+        print(f"Login did not complete (exit {exit_code}). Re-run it any time with:")
+        print(f"  rclone config create {account_id} protondrive --config {config_path}")
+        return
+
+    env_path = account_dir / "env"
+    with env_path.open("w", encoding="utf-8") as handle:
+        handle.write(f"PROTONDRIVE_REMOTE={account_id}\n")
+        handle.write(f"PROTONDRIVE_MOUNTPOINT={mount_path}\n")
+        handle.write(f"PROTONDRIVE_CONFIG={config_path}\n")
+    os.chmod(env_path, 0o600)
+
+    print()
+    print("Signed in. Start syncing with:")
+    print(f"  systemctl --user enable --now {UNIT_TEMPLATE.format(id=account_id)}")
+
+
+def cmd_remove(args):
+    accounts = load_accounts()
+    entry = find_account(accounts, args.id)
+    if not entry:
+        fail(f"no such account: {args.id}")
+
+    unit = UNIT_TEMPLATE.format(id=args.id)
+    subprocess.call(["systemctl", "--user", "disable", "--now", unit],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    remaining = [a for a in accounts if a.get("id") != args.id]
+    atomic_write_accounts(remaining)
+    print(f"Removed '{args.id}' from Proton Drive. Its rclone config and local mount folder were left in place:")
+    print(f"  {STATE_HOME / args.id}")
+    print(f"  {entry.get('mountPath', '')}")
+    print("Delete them yourself once you've confirmed nothing still needs them.")
+
+
+def _control(args, action, unit_state):
+    accounts = load_accounts()
+    entry = find_account(accounts, args.id)
+    if not entry:
+        fail(f"no such account: {args.id}")
+    unit = UNIT_TEMPLATE.format(id=args.id)
+    exit_code = subprocess.call(["systemctl", "--user", action, unit])
+    if exit_code != 0:
+        fail(f"systemctl --user {action} {unit} failed (exit {exit_code})")
+    print(f"{args.id}: {unit_state}")
+
+
+def cmd_pause(args):
+    _control(args, "stop", "paused")
+
+
+def cmd_resume(args):
+    _control(args, "start", "resumed")
+
+
+def _require_rclone():
+    from shutil import which
+    rclone = which("rclone")
+    if not rclone:
+        fail("rclone is not installed — run the install script first")
+    return rclone
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="protondrive-accountctl")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_list = sub.add_parser("list", help="list configured accounts")
+    p_list.set_defaults(func=cmd_list)
+
+    p_add = sub.add_parser("add", help="add and interactively sign in to a new account")
+    p_add.add_argument("id", help="short id, e.g. personal")
+    p_add.add_argument("display_name", nargs="?", default=None, help="display name, e.g. \"Personal\"")
+    p_add.set_defaults(func=cmd_add)
+
+    p_remove = sub.add_parser("remove", help="stop and forget an account (keeps local files)")
+    p_remove.add_argument("id")
+    p_remove.set_defaults(func=cmd_remove)
+
+    p_pause = sub.add_parser("pause", help="stop an account's mount/sync unit")
+    p_pause.add_argument("id")
+    p_pause.set_defaults(func=cmd_pause)
+
+    p_resume = sub.add_parser("resume", help="start an account's mount/sync unit")
+    p_resume.add_argument("id")
+    p_resume.set_defaults(func=cmd_resume)
+
+    args = parser.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

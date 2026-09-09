@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "id": "spencerowen.protondrive",
+  "name": "Proton Drive",
+  "version": "0.1.0",
+  "author": "Spencer Owen",
+  "license": "MIT",
+  "description": "Native Proton Drive sync for multiple accounts: bar status, storage usage, and pause/resume, backed by rclone mounts.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Proton Drive",
+    "description": "Log in to one or more Proton Drive accounts, see sync status and storage per account, and pause or resume syncing.",
+    "category": "Files",
+    "aliases": [
+      "protondrive",
+      "proton",
+      "drive"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalSec": 30,
+      "mountRoot": "~/ProtonDrive",
+      "showQuota": true
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 5,
+        "max": 600,
+        "step": 5,
+        "defaultValue": 30
+      },
+      {
+        "key": "mountRoot",
+        "type": "string",
+        "label": "Mount root",
+        "defaultValue": "~/ProtonDrive",
+        "description": "Parent directory holding one mount folder per account, e.g. ~/ProtonDrive/Personal."
+      },
+      {
+        "key": "showQuota",
+        "type": "boolean",
+        "label": "Show storage usage in the panel",
+        "defaultValue": true
+      }
+    ]
+  }
+}

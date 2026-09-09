@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+"""Read-only status helper for the Proton Drive Quickshell panel.
+
+Prints one JSON object on stdout, shaped for Model.js's parseAccounts():
+
+    {"ok": true, "rcloneInstalled": bool, "accounts": [...], "lastError": ""}
+
+Each account comes from ~/.config/omarchy-protondrive/accounts.json (written
+by protondrive-accountctl) plus two live checks: whether its systemd user
+unit is active (-> "active"), and whether `rclone about` succeeds against its
+own per-account config (-> "authenticated", plus usage/quota when it does).
+
+Never raises — a missing rclone, a missing config directory, or a hung
+`rclone about` call all degrade to a normal-looking JSON object with the
+account's `lastError` field set, the same way the first-party Dropbox
+plugin's status.py reports "not installed" instead of crashing the panel.
+
+--demo prints a fixed two-account fixture instead of touching the real
+config or rclone — used by test/status-fixture.sh and for previewing the
+panel's layout before any account is actually configured.
+"""
+
+import json
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+STATE_HOME = Path.home() / ".config" / "omarchy-protondrive"
+ACCOUNTS_FILE = STATE_HOME / "accounts.json"
+UNIT_TEMPLATE = "omarchy-protondrive@{id}.service"
+
+
+def demo_payload():
+    return {
+        "ok": True,
+        "rcloneInstalled": True,
+        "accounts": [
+            {
+                "id": "personal",
+                "displayName": "Personal",
+                "authenticated": True,
+                "active": True,
+                "statusText": "Syncing",
+                "mountPath": str(Path.home() / "ProtonDrive" / "Personal"),
+                "usedBytes": 4_200_000_000,
+                "quotaBytes": 20_000_000_000,
+                "quotaKnown": True,
+                "lastError": "",
+            },
+            {
+                "id": "work",
+                "displayName": "Work",
+                "authenticated": True,
+                "active": False,
+                "statusText": "Paused",
+                "mountPath": str(Path.home() / "ProtonDrive" / "Work"),
+                "usedBytes": 61_000_000_000,
+                "quotaBytes": 500_000_000_000,
+                "quotaKnown": True,
+                "lastError": "",
+            },
+        ],
+        "lastError": "",
+    }
+
+
+def command_output(command, timeout=4):
+    try:
+        completed = subprocess.run(
+            command, check=False, capture_output=True, text=True, timeout=timeout
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return 1, ""
+    return completed.returncode, (completed.stdout or "").strip()
+
+
+def load_accounts():
+    if not ACCOUNTS_FILE.exists():
+        return []
+    try:
+        with ACCOUNTS_FILE.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return []
+    accounts = data.get("accounts") if isinstance(data, dict) else None
+    return accounts if isinstance(accounts, list) else []
+
+
+def unit_active(account_id):
+    unit = UNIT_TEMPLATE.format(id=account_id)
+    exit_code, _ = command_output(["systemctl", "--user", "is-active", "--quiet", unit], timeout=3)
+    return exit_code == 0
+
+
+def account_status(rclone_path, entry):
+    account_id = str(entry.get("id", ""))
+    display_name = str(entry.get("displayName", account_id))
+    remote = str(entry.get("remote", account_id))
+    mount_path = str(entry.get("mountPath", ""))
+    config_path = STATE_HOME / account_id / "rclone.conf"
+
+    active = unit_active(account_id) if account_id else False
+    result = {
+        "id": account_id,
+        "displayName": display_name,
+        "authenticated": False,
+        "active": active,
+        "statusText": "Paused" if not active else "Syncing",
+        "mountPath": mount_path,
+        "usedBytes": 0,
+        "quotaBytes": 0,
+        "quotaKnown": False,
+        "lastError": "",
+    }
+
+    if rclone_path is None:
+        result["lastError"] = "rclone is not installed"
+        return result
+    if not config_path.exists():
+        result["lastError"] = "Not signed in yet"
+        return result
+
+    exit_code, output = command_output(
+        [rclone_path, "about", f"{remote}:", "--config", str(config_path), "--json"],
+        timeout=6,
+    )
+    if exit_code != 0:
+        result["lastError"] = "Sign-in expired or network unreachable"
+        result["statusText"] = "Needs attention"
+        return result
+
+    result["authenticated"] = True
+    try:
+        about = json.loads(output)
+    except json.JSONDecodeError:
+        about = {}
+    used = about.get("used")
+    total = about.get("total")
+    if isinstance(used, (int, float)):
+        result["usedBytes"] = used
+    if isinstance(total, (int, float)) and total > 0:
+        result["quotaBytes"] = total
+        result["quotaKnown"] = True
+    result["statusText"] = "Syncing" if active else "Paused"
+    return result
+
+
+def main():
+    if "--demo" in sys.argv[1:]:
+        print(json.dumps(demo_payload()))
+        return
+
+    rclone_path = shutil.which("rclone")
+    entries = load_accounts()
+    accounts = [account_status(rclone_path, entry) for entry in entries if isinstance(entry, dict)]
+
+    print(json.dumps({
+        "ok": True,
+        "rcloneInstalled": rclone_path is not None,
+        "accounts": accounts,
+        "lastError": "",
+    }))
+
+
+if __name__ == "__main__":
+    main()

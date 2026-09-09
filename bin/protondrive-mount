@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# ExecStart for omarchy-protondrive@<id>.service. All configuration comes
+# from the account's env file (PROTONDRIVE_REMOTE / _MOUNTPOINT / _CONFIG),
+# written by `protondrive-accountctl add`. Kept as a tiny wrapper rather than
+# inlining the rclone invocation in the unit file so the mount flags have one
+# place to live and can be tuned without touching systemd state.
+set -euo pipefail
+
+: "${PROTONDRIVE_REMOTE:?PROTONDRIVE_REMOTE is not set}"
+: "${PROTONDRIVE_MOUNTPOINT:?PROTONDRIVE_MOUNTPOINT is not set}"
+: "${PROTONDRIVE_CONFIG:?PROTONDRIVE_CONFIG is not set}"
+
+mkdir -p "$PROTONDRIVE_MOUNTPOINT"
+
+# --vfs-cache-mode=full: on-demand fetch like Dropbox Smart Sync, with a
+# local cache for files opened while offline. --vfs-cache-max-age bounds how
+# long the cache holds files that are not pinned. See PLAN.md for the
+# pin/offline design this leaves as a fast-follow (rclone doesn't have a
+# per-file "keep offline" concept on its own).
+exec rclone mount "${PROTONDRIVE_REMOTE}:" "$PROTONDRIVE_MOUNTPOINT" \
+  --config "$PROTONDRIVE_CONFIG" \
+  --vfs-cache-mode=full \
+  --vfs-cache-max-age=48h \
+  --dir-cache-time=1m \
+  --poll-interval=1m \
+  --no-modtime \
+  -o uid="$(id -u)" -o gid="$(id -g)"
