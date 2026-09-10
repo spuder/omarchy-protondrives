@@ -6,9 +6,18 @@ Prints one JSON object on stdout, shaped for Model.js's parseAccounts():
     {"ok": true, "rcloneInstalled": bool, "accounts": [...], "lastError": ""}
 
 Each account comes from ~/.config/omarchy-protondrive/accounts.json (written
-by protondrive-accountctl) plus two live checks: whether its systemd user
-unit is active (-> "active"), and whether `rclone about` succeeds against its
-own per-account config (-> "authenticated", plus usage/quota when it does).
+by protondrive-accountctl) plus two checks: whether its systemd user unit is
+active (-> "active" — cheap and local, so this always runs fresh), and
+whether `rclone about` succeeds against its own per-account config (->
+"authenticated", plus usage/quota when it does).
+
+The `rclone about` check is cached per account (see CACHE_TTL_SECONDS): the
+panel refreshes every ~30s by default, and Proton Drive's API is
+reverse-engineered rather than official (see PLAN.md), so polling it live
+on every refresh — for every account — isn't something to do by accident.
+A healthy result is trusted for the TTL; an error is always rechecked
+immediately, so a lapsed/expired sign-in doesn't stay hidden behind a stale
+cache.
 
 Never raises — a missing rclone, a missing config directory, or a hung
 `rclone about` call all degrade to a normal-looking JSON object with the
@@ -24,11 +33,13 @@ import json
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 STATE_HOME = Path.home() / ".config" / "omarchy-protondrive"
 ACCOUNTS_FILE = STATE_HOME / "accounts.json"
 UNIT_TEMPLATE = "omarchy-protondrive@{id}.service"
+CACHE_TTL_SECONDS = 600
 
 
 def demo_payload():
@@ -93,6 +104,55 @@ def unit_active(account_id):
     return exit_code == 0
 
 
+def cache_path(account_id):
+    return STATE_HOME / account_id / "quota-cache.json"
+
+
+def load_cache(account_id):
+    path = cache_path(account_id)
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def save_cache(account_id, data):
+    path = cache_path(account_id)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data), encoding="utf-8")
+    tmp.replace(path)  # same directory, so this is an atomic rename like accountctl's writes
+
+
+def fetch_quota(rclone_path, remote, config_path):
+    """One live `rclone about` call. Returns a dict with authenticated/
+    usedBytes/quotaBytes/quotaKnown/lastError/statusHint — never raises."""
+    exit_code, output = command_output(
+        [rclone_path, "about", f"{remote}:", "--config", str(config_path), "--json"],
+        timeout=6,
+    )
+    if exit_code != 0:
+        return {
+            "authenticated": False, "usedBytes": 0, "quotaBytes": 0, "quotaKnown": False,
+            "lastError": "Sign-in expired or network unreachable", "statusHint": "Needs attention",
+        }
+    try:
+        about = json.loads(output)
+    except json.JSONDecodeError:
+        about = {}
+    used = about.get("used")
+    total = about.get("total")
+    return {
+        "authenticated": True,
+        "usedBytes": used if isinstance(used, (int, float)) else 0,
+        "quotaBytes": total if isinstance(total, (int, float)) and total > 0 else 0,
+        "quotaKnown": isinstance(total, (int, float)) and total > 0,
+        "lastError": "",
+        "statusHint": "",
+    }
+
+
 def account_status(rclone_path, entry):
     account_id = str(entry.get("id", ""))
     display_name = str(entry.get("displayName", account_id))
@@ -121,28 +181,28 @@ def account_status(rclone_path, entry):
         result["lastError"] = "Not signed in yet"
         return result
 
-    exit_code, output = command_output(
-        [rclone_path, "about", f"{remote}:", "--config", str(config_path), "--json"],
-        timeout=6,
+    # A healthy quota check is cached for CACHE_TTL_SECONDS to avoid polling
+    # Proton's (reverse-engineered) API on every panel refresh. An error is
+    # never cached — always recheck immediately, so an expired sign-in shows
+    # up right away instead of waiting out the TTL.
+    cache = load_cache(account_id)
+    fresh_enough = (
+        cache is not None
+        and cache.get("authenticated") is True
+        and not cache.get("lastError")
+        and (time.time() - cache.get("checkedAt", 0)) < CACHE_TTL_SECONDS
     )
-    if exit_code != 0:
-        result["lastError"] = "Sign-in expired or network unreachable"
-        result["statusText"] = "Needs attention"
-        return result
 
-    result["authenticated"] = True
-    try:
-        about = json.loads(output)
-    except json.JSONDecodeError:
-        about = {}
-    used = about.get("used")
-    total = about.get("total")
-    if isinstance(used, (int, float)):
-        result["usedBytes"] = used
-    if isinstance(total, (int, float)) and total > 0:
-        result["quotaBytes"] = total
-        result["quotaKnown"] = True
-    result["statusText"] = "Syncing" if active else "Paused"
+    quota = cache if fresh_enough else fetch_quota(rclone_path, remote, config_path)
+    if not fresh_enough:
+        save_cache(account_id, dict(quota, checkedAt=time.time()))
+
+    result["authenticated"] = quota["authenticated"]
+    result["usedBytes"] = quota["usedBytes"]
+    result["quotaBytes"] = quota["quotaBytes"]
+    result["quotaKnown"] = quota["quotaKnown"]
+    result["lastError"] = quota["lastError"]
+    result["statusText"] = quota["statusHint"] or ("Syncing" if active else "Paused")
     return result
 
 

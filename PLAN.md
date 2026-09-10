@@ -9,26 +9,40 @@ This is v0.1, a proof of concept. Honestly:
   namespace, no symlinks).
 - `Model.js`'s parsing/formatting logic — 8/8 Node unit tests.
 - `bin/protondrive-status` — valid JSON in both `--demo` mode and against an
-  empty/missing config (`test/status-fixture.sh`).
+  empty/missing config (`test/status-fixture.sh`), plus a per-account quota
+  cache (`CACHE_TTL_SECONDS`) so the panel's periodic refresh doesn't hit
+  Proton's API live every ~30s per account — errors always recheck
+  immediately regardless of the cache.
 - `Panel.qml` / `Service.qml` / `ProtonDriveIcon.qml` — syntactically valid
   QML per `qmllint`, checked against the same baseline as the real,
   shipped Dropbox plugin (see README's Verification section for why that
   comparison is the right bar, given `qmllint` can't resolve Quickshell's
   own `qs.*` modules standalone).
+- `protondrive-accountctl add`, hand-tested against the real rclone
+  `protondrive` backend with deliberately bad credentials: prompts for
+  id/display name/email/password/2FA/mailbox password, verifies the login
+  with a live `rclone about` call rather than trusting `rclone config
+  create`'s exit code (which, per rclone's own docs, silently defaults
+  unanswered questions instead of prompting — it does **not** validate
+  credentials on its own), and rolls back cleanly on failure with no
+  orphaned state. Also caught and fixed: a bad password made `rclone about`
+  hang the full timeout, and the resulting uncaught `TimeoutExpired`
+  crashed past the rollback. Not yet tested with a real, working login.
 
 **Not yet done — the actual gap between this and "finished":**
 - Never run inside a live `omarchy-shell`. The panel's layout, keyboard
   navigation, and IPC handler are modeled closely on the first-party Dropbox
   plugin's, but "closely modeled" is not "confirmed working."
-- Never run against a real Proton Drive account. `rclone`'s `protondrive`
-  backend is beta and has broken before (see below) — `protondrive-accountctl
-  add`'s `rclone config create ... protondrive` call needs a live login to
-  prove out.
+- Never completed a real, successful login — only tested the failure path
+  (see above). A working account is needed to confirm the mount itself,
+  the pause/resume toggle, and quota display end to end.
 - No Nautilus emblem/context-menu extension yet (Phase 3 below).
-- No in-panel login form — "Add account" currently shells out to a terminal
-  running an interactive `rclone config create`, because Proton's SRP + 2FA
-  + mailbox-password flow has no browser hand-off to build a native form
-  around yet (Phase 4).
+- No in-panel login form — "Add account" opens a terminal
+  (`omarchy-launch-tui`) running `protondrive-accountctl add`, because
+  Proton's SRP + 2FA + mailbox-password flow has no browser hand-off to
+  build a native QML form around yet (Phase 4). See "Official Proton Drive
+  SDK/CLI" below for a login flow that does have one, and why it isn't a
+  drop-in fix.
 - No conflict-resolution UI, no per-file "keep offline" pinning beyond
   rclone's own VFS cache (Phase 4/5).
 
@@ -43,11 +57,11 @@ official Linux client for Proton Drive, so this plugin has to own more:
    handles Proton's SRP login and client-side (PGP-based) encryption. Not
    reimplemented here — that's not something to get subtly wrong. It's
    currently beta; uploads broke between roughly November 2025 and an
-   early-2026 fix (missing block-verification tokens, a broken retry path),
-   and there's an open effort to align the backend with Proton's own
-   upcoming official SDK (targeted late 2026/2027, JS/C# only — no native
-   Linux SDK is coming from Proton itself). Pin a recent rclone version and
-   watch for backend regressions.
+   early-2026 fix (missing block-verification tokens, a broken retry path).
+   Pin a recent rclone version and watch for backend regressions. See
+   "Official Proton Drive SDK/CLI" below — there's now a real official
+   alternative worth tracking, but it doesn't do sync/mount yet, so rclone
+   stays the sync engine for now.
 2. **Filesystem**: `rclone mount --vfs-cache-mode=full` per account — FUSE,
    on-demand fetch, local cache for pinned/recently-used files. Chosen over
    `rclone bisync` (still beta, periodic reconciliation rather than
@@ -62,6 +76,52 @@ official Linux client for Proton Drive, so this plugin has to own more:
    not in `shell.json`'s per-widget settings blob.
 4. **File-manager surface**: out of Quickshell's reach — it's compositor/
    shell-level, not GTK. Needs a separate Nautilus extension (Phase 3).
+
+## Official Proton Drive SDK/CLI (found 2026-09-09)
+
+There is now an official Proton AG SDK and CLI:
+[`ProtonDriveApps/sdk`](https://github.com/ProtonDriveApps/sdk), MIT
+licensed, `cli/` built with Bun. It's a real step up on auth: browser-based
+login (no password typed at a CLI prompt) with the session stored in the
+OS secret store — `libsecret` on Linux — which is a materially better auth
+UX than either rclone's SRP prompts or the terminal flow this plugin
+currently uses. It also doesn't help with the actual job this plugin does:
+**no sync command and no mount**, just one-shot `filesystem list/upload/
+download/move/rename/trash` and sharing. The README explicitly says it's
+"not production-ready for third-party use," with the interface still
+changing and a crypto migration planned for late 2026/early 2027. It's also
+a separate credential system from rclone's — adopting its login wouldn't
+by itself fix rclone's, since they don't share a session.
+
+Verdict: keep rclone mount as the sync/FUSE engine — nothing else does that
+job today. Revisit this SDK once it's stable and (if it ever ships one) has
+a sync/mount story of its own; until then it's most useful as the
+legitimate direct-API path for share-link generation (Phase 3) once mature
+enough to depend on.
+
+## Prior art: schneipp/omarchy-proton-drive-plugin (found 2026-09-09)
+
+A published, early-stage (5 commits, no version tags) Omarchy plugin:
+[github.com/schneipp/omarchy-proton-drive-plugin](https://github.com/schneipp/omarchy-proton-drive-plugin).
+Worth knowing about, and validates rather than replaces this approach:
+
+- Built on the official CLI above (`proton-drive-cli-bin`, AUR), not
+  rclone — inherits its browser-based login, launched via
+  `omarchy-launch-tui` rather than a hardcoded terminal binary. **Adopted
+  that pattern here** (see Service.qml) — it respects the user's actual
+  configured terminal via `xdg-terminal-exec` instead of assuming one.
+- No FUSE mount: since the official CLI has none, it's an app-level
+  browser/upload/download tool with a hand-rolled sync loop (diffing
+  `activeRevision.claimedSize` / `claimedModificationTime` / `claimedDigests.
+  sha1` between listings), not a `~/ProtonDrive` folder that behaves like a
+  real filesystem. That's the actual ask this plugin exists to meet, and it
+  isn't one.
+- Single account only.
+
+So the two things this plugin is actually for — a real on-demand FUSE mount,
+and multiple simultaneous accounts — remain unaddressed by anything else
+that exists right now. That's the case for continuing to build this rather
+than switching to or forking theirs, terminal-launch pattern aside.
 
 ## Multi-account design
 

@@ -110,11 +110,18 @@ Item {
     // running the interactive helper rather than a native form. See PLAN.md
     // Phase 4 for the planned in-panel login form.
     actionStatus = "Opening Proton Drive login in a terminal…"
-    // --hold keeps the window open after the script exits, so a failure
-    // (bad id, rclone missing, sign-in rejected) is readable instead of the
-    // terminal just vanishing — that silent-vanish was a real bug in an
-    // earlier version of this call, worth not regressing back into.
-    Quickshell.execDetached(["uwsm-app", "--", "foot", "--hold", root.pluginDir + "bin/protondrive-accountctl", "add"])
+    // omarchy-launch-tui respects the user's actual configured terminal
+    // (xdg-terminal-exec) instead of assuming one, and applies proper
+    // window styling/app-id — better than shelling out to a hardcoded
+    // terminal binary directly. The bash -c trailer holds the window open
+    // and reports the exit code after the script finishes, terminal-
+    // agnostically, so a failure (bad id, rclone missing, sign-in
+    // rejected) is readable instead of the window just vanishing — that
+    // silent-vanish was a real bug in an earlier version of this call,
+    // worth not regressing back into. Assumes pluginDir has no single
+    // quote in it, true for any path this plugin is normally installed at.
+    var script = "'" + root.pluginDir + "bin/protondrive-accountctl' add; ec=$?; echo; read -rp 'Press Enter to close...'; exit $ec"
+    Quickshell.execDetached(["omarchy-launch-tui", "--app-id=protondrive-login", "bash", "-c", script])
   }
 
   function runControl(command) {
