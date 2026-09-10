@@ -112,6 +112,39 @@ def prompt_yes_no(label):
     return input(f"{label} [y/N]: ").strip().lower() in ("y", "yes")
 
 
+# rclone error substrings this plugin knows the real cause of, mapped to a
+# plain-language explanation. Checked against the raw stderr/stdout from
+# `rclone config create`/`rclone about`. Deliberately short: each entry here
+# is a pattern actually seen and root-caused, not a guess at rclone's wording
+# for something plausible — an unmatched error still shows rclone's own
+# message (see friendly_error's docstring) rather than a wrong translation.
+_KNOWN_RCLONE_ERRORS = [
+    (
+        "the main share assumption has failed",
+        "This Proton account doesn't have a Drive volume yet — rclone found "
+        "zero shares for it. Proton only creates one the first time Drive is "
+        "opened from a browser or the official app. Sign in at "
+        "https://drive.proton.me with this account once, then try adding it "
+        "here again.",
+    ),
+]
+
+
+def friendly_error(detail):
+    """A plain-language explanation for a known rclone failure, or None to
+    fall back to showing rclone's own message. See PLAN.md for why sign-in
+    failures generally show rclone's raw output rather than translating
+    everything — most errors are one-offs not worth chasing down, but this
+    particular one (a never-opened Drive account) is common enough, and
+    rclone's own wording ("shares []proton.ShareMetadata{}") is opaque
+    enough, that it's worth naming specifically."""
+    lowered = detail.lower()
+    for needle, message in _KNOWN_RCLONE_ERRORS:
+        if needle in lowered:
+            return message
+    return None
+
+
 def perform_add(rclone, account_id, display_name, username, password, twofa, mailbox_password):
     """The actual create+verify+register, shared by the interactive prompt
     flow and --json (used by Panel.qml's login form — see Service.qml).
@@ -172,6 +205,9 @@ def perform_add(rclone, account_id, display_name, username, password, twofa, mai
         # Roll back so the id is free to retry, rather than leaving a
         # permanently broken stub that "already exists" forever after.
         shutil.rmtree(account_dir, ignore_errors=True)
+        friendly = friendly_error(verify_detail)
+        if friendly:
+            return False, friendly
         return False, f"sign-in failed, nothing was saved. rclone said:\n  {verify_detail or 'unknown error'}"
 
     accounts.append({
