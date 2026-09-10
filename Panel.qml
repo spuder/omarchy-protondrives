@@ -520,9 +520,13 @@ Panel {
     property var account: null
     property int rowIndex: 0
     readonly property bool active: account ? proton.displayActive(account) : false
+    // Purple (theme accent) syncing, white (foreground) paused, red
+    // (urgent) errored — accent specifically, not plain foreground, so
+    // "actively syncing" reads as the theme's brand color rather than
+    // indistinguishable default text color.
     readonly property color statusColor: !account ? root.dim
       : account.lastError !== "" ? root.urgent
-      : active ? root.foreground : root.dim
+      : active ? Color.accent : root.foreground
 
     hasCursor: root.cursorActive && root.focusSection === "accounts" && root.accountIndex === rowIndex
     foreground: root.foreground
