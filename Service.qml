@@ -110,7 +110,11 @@ Item {
     // running the interactive helper rather than a native form. See PLAN.md
     // Phase 4 for the planned in-panel login form.
     actionStatus = "Opening Proton Drive login in a terminal…"
-    Quickshell.execDetached(["uwsm-app", "--", "foot", root.pluginDir + "bin/protondrive-accountctl", "add"])
+    // --hold keeps the window open after the script exits, so a failure
+    // (bad id, rclone missing, sign-in rejected) is readable instead of the
+    // terminal just vanishing — that silent-vanish was a real bug in an
+    // earlier version of this call, worth not regressing back into.
+    Quickshell.execDetached(["uwsm-app", "--", "foot", "--hold", root.pluginDir + "bin/protondrive-accountctl", "add"])
   }
 
   function runControl(command) {

@@ -10,10 +10,22 @@ State lives under ~/.config/omarchy-protondrive/:
 `add` is meant to run inside a terminal (Service.qml's "Add account" button
 launches one) since Proton's login is interactive: SRP username/password,
 2FA, and the separate mailbox password, none of which has a browser hand-off
-to shell out to the way Dropbox's OAuth link does. It shells out to
-`rclone config create`, which prompts for all of that itself.
+to shell out to the way Dropbox's OAuth link does. `id`/`display_name` fall
+back to prompts when not given as arguments, so the bare `add` the GUI
+button runs (no arguments — it can't collect text input yet, see PLAN.md
+Phase 4) works standalone in a terminal instead of exiting immediately.
 
-Every write to accounts.json goes through _atomic_write_json: write to a
+Credentials are prompted for *by this script*, not by rclone: `rclone
+config create` only prompts interactively via the classic `rclone config`
+wizard. Given explicit key=value arguments (which is what a script has to
+do) it silently fills any question it would have asked — including
+required, no-default fields like username/password — with their defaults
+and exits 0. So after creating the remote this always re-checks with
+`rclone about` before calling it a success; a stub config with empty
+credentials fails that check as it should, instead of reporting "Signed
+in" for a login that never happened.
+
+Every write to accounts.json goes through atomic_write_accounts: write to a
 sibling temp file, then os.replace over the target, and refuse a target that
 is a symlink first. Same reasoning as the CPU plugin's state-dir-safety
 test — this directory is trusted, so nothing here should follow a symlink
@@ -21,9 +33,10 @@ planted in it.
 """
 
 import argparse
+import getpass
 import json
 import os
-import stat
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -89,23 +102,95 @@ def cmd_list(args):
         print(f"{entry.get('id')}\t{entry.get('displayName')}\t{entry.get('mountPath')}")
 
 
+def prompt(label, default=None):
+    suffix = f" [{default}]" if default else ""
+    value = input(f"{label}{suffix}: ").strip()
+    return value or (default or "")
+
+
+def prompt_yes_no(label):
+    return input(f"{label} [y/N]: ").strip().lower() in ("y", "yes")
+
+
 def cmd_add(args):
-    account_id = args.id.strip().lower()
+    rclone = _require_rclone()  # fail before asking anything, not after
+
+    account_id = (args.id or prompt("Account id, e.g. personal")).strip().lower()
     if not VALID_ID.match(account_id):
         fail("id must be lowercase letters, digits, and hyphens, starting with a letter or digit")
 
     accounts = load_accounts()
     if find_account(accounts, account_id):
-        fail(f"account '{account_id}' already exists")
+        fail(f"account '{account_id}' already exists — remove it first: protondrive-accountctl remove {account_id}")
 
-    display_name = args.display_name or account_id.replace("-", " ").title()
+    default_name = account_id.replace("-", " ").title()
+    display_name = args.display_name or prompt("Display name", default_name)
+
+    print()
+    print(f"Signing in to Proton Drive for '{account_id}' ({display_name}).")
+    print("This talks directly to rclone's protondrive backend — nothing is sent anywhere else.")
+    username = prompt("Proton account email")
+    password = getpass.getpass("Proton account password: ")
+    twofa = getpass.getpass("2FA code (leave blank if not enabled): ")
+    mailbox_password = ""
+    if prompt_yes_no("Does this account use a separate mailbox password (old Proton accounts only)?"):
+        mailbox_password = getpass.getpass("Mailbox password: ")
+
+    if not username or not password:
+        fail("email and password are required")
+
     account_dir = STATE_HOME / account_id
     ensure_private_dir(account_dir)
-
     mount_path = MOUNT_ROOT / display_name
     mount_path.mkdir(parents=True, exist_ok=True)
-
     config_path = account_dir / "rclone.conf"
+
+    create_args = [
+        rclone, "config", "create", account_id, "protondrive",
+        "--config", str(config_path),
+        "--obscure",
+        f"username={username}",
+        f"password={password}",
+    ]
+    if twofa:
+        create_args += [f"2fa={twofa}"]
+    if mailbox_password:
+        create_args += [f"mailbox_password={mailbox_password}"]
+
+    print()
+    print("Contacting Proton...")
+    # Discard rclone's own stdout/stderr here: on success it's a config dump
+    # that would otherwise echo the credentials/obscured password back to
+    # the terminal, and on failure the rclone about check below produces a
+    # clearer message anyway. Every rclone call from here down is wrapped —
+    # a bad password can make `rclone about` hang for the full timeout
+    # instead of failing fast, and an uncaught TimeoutExpired would both
+    # crash with a raw traceback and skip the rollback below, leaving an
+    # orphaned ~/.config/omarchy-protondrive/<id>/ with a dead rclone.conf
+    # in it. Both actually happened while testing this.
+    verify_ok = False
+    verify_detail = ""
+    try:
+        create_result = subprocess.run(create_args, capture_output=True, text=True, timeout=60)
+        if create_result.returncode == 0:
+            about = subprocess.run(
+                [rclone, "about", f"{account_id}:", "--config", str(config_path), "--json"],
+                capture_output=True, text=True, timeout=30,
+            )
+            verify_ok = about.returncode == 0
+            verify_detail = (about.stderr or about.stdout or "").strip()
+        else:
+            verify_detail = (create_result.stderr or create_result.stdout or "").strip()
+    except subprocess.TimeoutExpired:
+        verify_detail = "rclone did not respond in time (wrong password/2FA can cause this)"
+        create_result = None
+
+    if not verify_ok:
+        # Roll back so the id is free to retry, rather than leaving a
+        # permanently broken stub that "already exists" forever after.
+        shutil.rmtree(account_dir, ignore_errors=True)
+        fail(f"sign-in failed, nothing was saved. rclone said:\n  {verify_detail or 'unknown error'}")
+
     accounts.append({
         "id": account_id,
         "displayName": display_name,
@@ -113,22 +198,6 @@ def cmd_add(args):
         "mountPath": str(mount_path),
     })
     atomic_write_accounts(accounts)
-
-    print(f"Registered '{account_id}' ({display_name}), mounting at {mount_path}")
-    print("Starting the interactive Proton Drive login (rclone config create)...")
-    print()
-
-    rclone = _require_rclone()
-    exit_code = subprocess.call([
-        rclone, "config", "create", account_id, "protondrive",
-        "--config", str(config_path),
-        "--non-interactive=false",
-    ])
-    if exit_code != 0:
-        print()
-        print(f"Login did not complete (exit {exit_code}). Re-run it any time with:")
-        print(f"  rclone config create {account_id} protondrive --config {config_path}")
-        return
 
     env_path = account_dir / "env"
     with env_path.open("w", encoding="utf-8") as handle:
@@ -138,7 +207,7 @@ def cmd_add(args):
     os.chmod(env_path, 0o600)
 
     print()
-    print("Signed in. Start syncing with:")
+    print(f"Signed in and verified with a live 'rclone about' call. Start syncing with:")
     print(f"  systemctl --user enable --now {UNIT_TEMPLATE.format(id=account_id)}")
 
 
@@ -181,8 +250,7 @@ def cmd_resume(args):
 
 
 def _require_rclone():
-    from shutil import which
-    rclone = which("rclone")
+    rclone = shutil.which("rclone")
     if not rclone:
         fail("rclone is not installed — run the install script first")
     return rclone
@@ -196,8 +264,8 @@ def main():
     p_list.set_defaults(func=cmd_list)
 
     p_add = sub.add_parser("add", help="add and interactively sign in to a new account")
-    p_add.add_argument("id", help="short id, e.g. personal")
-    p_add.add_argument("display_name", nargs="?", default=None, help="display name, e.g. \"Personal\"")
+    p_add.add_argument("id", nargs="?", default=None, help="short id, e.g. personal (prompted for if omitted)")
+    p_add.add_argument("display_name", nargs="?", default=None, help="display name, e.g. \"Personal\" (prompted for if omitted)")
     p_add.set_defaults(func=cmd_add)
 
     p_remove = sub.add_parser("remove", help="stop and forget an account (keeps local files)")
