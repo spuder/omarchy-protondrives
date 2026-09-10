@@ -152,6 +152,10 @@ Panel {
       onTextKey: function(t) {
         if (t === "r" || t === "R") proton.refresh()
         else if (t === "a" || t === "A") proton.beginAddAccount()
+        else if (t === "o" || t === "O") {
+          var account = root.selectedAccount()
+          if (account) proton.openMountFolder(account)
+        }
       }
 
       Flickable {
@@ -231,6 +235,16 @@ Panel {
               text: "ACCOUNTS"
               foreground: root.foreground
               fontFamily: root.fontFamily
+            }
+
+            Text {
+              textFormat: Text.PlainText
+              width: parent.width
+              text: "Click, or press o, to open the selected account's folder"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
             }
 
             Column {
