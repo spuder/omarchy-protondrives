@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 # Installs this plugin's runtime dependencies and helper scripts, then
-# enables the bar widget. Not wired into `omarchy install service ...` —
+# enables the bar widget. Not wired into `omarchy install service ...`,
 # that dispatcher only scans Omarchy's own /usr/bin, which is reserved for
 # first-party services (see the omarchy.* id restriction in
 # omarchy-plugin-validate). Third-party plugins install themselves.
 #
-# Usage: ./install.sh   (run once, after `omarchy plugin add <this repo>`)
+# Usage, run once, after `omarchy plugin add <this repo> --enable`:
+#   ~/.config/omarchy/plugins/spencerowen.protondrive/install.sh
+# Safe to run from anywhere: everything below is relative to this script's
+# own directory, not the caller's.
 set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")"
 
 echo "Installing rclone and the Nautilus emblem/context-menu extension..."
 omarchy-pkg-add rclone nautilus-python
@@ -26,13 +30,12 @@ omarchy-plugin-enable spencerowen.protondrive
 
 cat <<MSG
 
-Installed. Add your first account with:
+Installed. Click the new "P" icon in the bar and choose "Add a Proton Drive
+account" for the in-panel sign-in form, or from a terminal:
 
   protondrive-accountctl add personal "Personal"
 
-or click the new Proton Drive icon in the bar and choose "Add a Proton Drive
-account" — either opens an interactive rclone login in a terminal. Once
-signed in, start syncing with:
+Either way, once signed in, start syncing with:
 
   systemctl --user enable --now omarchy-protondrive@personal.service
 

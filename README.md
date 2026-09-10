@@ -24,18 +24,21 @@ tab required.
 ## Install
 
 ```bash
-git clone <this-repo> && cd omarchy-protondrive
-omarchy plugin add "$(pwd)" --enable   # or: omarchy plugin add <git-url> --enable
-./install.sh                            # installs rclone + helper scripts, enables the widget
+omarchy plugin add https://github.com/spuder/omarchy-protondrive.git --enable
+~/.config/omarchy/plugins/spencerowen.protondrive/install.sh
 ```
+
+The first line clones and enables the widget; the second installs rclone
+and the helper scripts it needs. No manual `git clone` required.
 
 Click "Add a Proton Drive account" in the panel, a real in-app form, email
 and password straight to rclone over the process's own stdin, never a
 command-line argument, never written to disk, never logged. Add as many
 accounts as you like; each shows up as its own row.
 
-Remove with `./uninstall.sh` (your signed-in accounts and synced files are
-left alone; see the script for exactly what it does and doesn't touch).
+Remove with `~/.config/omarchy/plugins/spencerowen.protondrive/uninstall.sh`
+(your signed-in accounts and synced files are left alone; see the script
+for exactly what it does and doesn't touch).
 
 ## Developing
 
