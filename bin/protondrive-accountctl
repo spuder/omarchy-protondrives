@@ -112,32 +112,18 @@ def prompt_yes_no(label):
     return input(f"{label} [y/N]: ").strip().lower() in ("y", "yes")
 
 
-def cmd_add(args):
-    rclone = _require_rclone()  # fail before asking anything, not after
-
-    account_id = (args.id or prompt("Account id, e.g. personal")).strip().lower()
+def perform_add(rclone, account_id, display_name, username, password, twofa, mailbox_password):
+    """The actual create+verify+register, shared by the interactive prompt
+    flow and --json (used by Panel.qml's login form — see Service.qml).
+    Returns (ok, message). Never raises."""
     if not VALID_ID.match(account_id):
-        fail("id must be lowercase letters, digits, and hyphens, starting with a letter or digit")
+        return False, "id must be lowercase letters, digits, and hyphens, starting with a letter or digit"
 
     accounts = load_accounts()
     if find_account(accounts, account_id):
-        fail(f"account '{account_id}' already exists — remove it first: protondrive-accountctl remove {account_id}")
-
-    default_name = account_id.replace("-", " ").title()
-    display_name = args.display_name or prompt("Display name", default_name)
-
-    print()
-    print(f"Signing in to Proton Drive for '{account_id}' ({display_name}).")
-    print("This talks directly to rclone's protondrive backend — nothing is sent anywhere else.")
-    username = prompt("Proton account email")
-    password = getpass.getpass("Proton account password: ")
-    twofa = getpass.getpass("2FA code (leave blank if not enabled): ")
-    mailbox_password = ""
-    if prompt_yes_no("Does this account use a separate mailbox password (old Proton accounts only)?"):
-        mailbox_password = getpass.getpass("Mailbox password: ")
-
+        return False, f"account '{account_id}' already exists — remove it first: protondrive-accountctl remove {account_id}"
     if not username or not password:
-        fail("email and password are required")
+        return False, "email and password are required"
 
     account_dir = STATE_HOME / account_id
     ensure_private_dir(account_dir)
@@ -157,8 +143,6 @@ def cmd_add(args):
     if mailbox_password:
         create_args += [f"mailbox_password={mailbox_password}"]
 
-    print()
-    print("Contacting Proton...")
     # Discard rclone's own stdout/stderr here: on success it's a config dump
     # that would otherwise echo the credentials/obscured password back to
     # the terminal, and on failure the rclone about check below produces a
@@ -183,13 +167,12 @@ def cmd_add(args):
             verify_detail = (create_result.stderr or create_result.stdout or "").strip()
     except subprocess.TimeoutExpired:
         verify_detail = "rclone did not respond in time (wrong password/2FA can cause this)"
-        create_result = None
 
     if not verify_ok:
         # Roll back so the id is free to retry, rather than leaving a
         # permanently broken stub that "already exists" forever after.
         shutil.rmtree(account_dir, ignore_errors=True)
-        fail(f"sign-in failed, nothing was saved. rclone said:\n  {verify_detail or 'unknown error'}")
+        return False, f"sign-in failed, nothing was saved. rclone said:\n  {verify_detail or 'unknown error'}"
 
     accounts.append({
         "id": account_id,
@@ -206,9 +189,56 @@ def cmd_add(args):
         handle.write(f"PROTONDRIVE_CONFIG={config_path}\n")
     os.chmod(env_path, 0o600)
 
+    return True, f"Signed in and verified. Start syncing with: systemctl --user enable --now {UNIT_TEMPLATE.format(id=account_id)}"
+
+
+def cmd_add(args):
+    rclone = _require_rclone()  # fail before asking anything, not after
+
+    if args.json:
+        # Driven by Panel.qml's login form over stdin, not a terminal — see
+        # Service.qml's submitLogin(). One line of JSON in, one line of JSON
+        # out; every field the interactive prompts below collect, collected
+        # by the form instead. The password/2FA/mailbox password arrive over
+        # stdin, never argv, the same way the first-party network plugin
+        # sends Wi-Fi passwords ("the password goes over stdin, never argv").
+        try:
+            payload = json.loads(sys.stdin.readline())
+        except json.JSONDecodeError:
+            print(json.dumps({"ok": False, "error": "malformed request"}))
+            sys.exit(1)
+        account_id = str(payload.get("id", "")).strip().lower()
+        display_name = str(payload.get("displayName") or account_id.replace("-", " ").title())
+        ok, message = perform_add(
+            rclone, account_id, display_name,
+            str(payload.get("username", "")), str(payload.get("password", "")),
+            str(payload.get("twofa", "")), str(payload.get("mailboxPassword", "")),
+        )
+        print(json.dumps({"ok": ok, "error": "" if ok else message, "message": message if ok else ""}))
+        sys.exit(0 if ok else 1)
+
+    account_id = (args.id or prompt("Account id, e.g. personal")).strip().lower()
+    default_name = account_id.replace("-", " ").title()
+    display_name = args.display_name or prompt("Display name", default_name)
+
     print()
-    print(f"Signed in and verified with a live 'rclone about' call. Start syncing with:")
-    print(f"  systemctl --user enable --now {UNIT_TEMPLATE.format(id=account_id)}")
+    print(f"Signing in to Proton Drive for '{account_id}' ({display_name}).")
+    print("This talks directly to rclone's protondrive backend — nothing is sent anywhere else.")
+    username = prompt("Proton account email")
+    password = getpass.getpass("Proton account password: ")
+    twofa = getpass.getpass("2FA code (leave blank if not enabled): ")
+    mailbox_password = ""
+    if prompt_yes_no("Does this account use a separate mailbox password (old Proton accounts only)?"):
+        mailbox_password = getpass.getpass("Mailbox password: ")
+
+    print()
+    print("Contacting Proton...")
+    ok, message = perform_add(rclone, account_id, display_name, username, password, twofa, mailbox_password)
+    print()
+    if ok:
+        print(message)
+    else:
+        fail(message)
 
 
 def cmd_remove(args):
@@ -263,9 +293,13 @@ def main():
     p_list = sub.add_parser("list", help="list configured accounts")
     p_list.set_defaults(func=cmd_list)
 
-    p_add = sub.add_parser("add", help="add and interactively sign in to a new account")
+    p_add = sub.add_parser("add", help="add and sign in to a new account")
     p_add.add_argument("id", nargs="?", default=None, help="short id, e.g. personal (prompted for if omitted)")
     p_add.add_argument("display_name", nargs="?", default=None, help="display name, e.g. \"Personal\" (prompted for if omitted)")
+    p_add.add_argument("--json", action="store_true",
+                        help="non-interactive: read one JSON line from stdin "
+                             "({id, displayName, username, password, twofa, mailboxPassword}), "
+                             "print one JSON line back. Used by Panel.qml's login form.")
     p_add.set_defaults(func=cmd_add)
 
     p_remove = sub.add_parser("remove", help="stop and forget an account (keeps local files)")

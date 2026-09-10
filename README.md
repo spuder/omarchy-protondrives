@@ -40,8 +40,11 @@ omarchy plugin add "$(pwd)" --enable   # or: omarchy plugin add <git-url> --enab
 ./install.sh                            # installs rclone + helper scripts, enables the widget
 ```
 
-Add an account (also reachable from the panel's "Add a Proton Drive
-account" row, which opens the same command in a terminal):
+Add an account from the panel's "Add a Proton Drive account" row — a real
+in-panel form (email/password/2FA/mailbox password), not a terminal. The
+password goes straight to `protondrive-accountctl add --json` over stdin,
+never argv, the same pattern the first-party network plugin uses for Wi-Fi
+passwords. Or from a terminal directly:
 
 ```bash
 protondrive-accountctl add personal "Personal"

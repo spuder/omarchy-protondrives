@@ -29,22 +29,33 @@ This is v0.1, a proof of concept. Honestly:
   hang the full timeout, and the resulting uncaught `TimeoutExpired`
   crashed past the rollback. Not yet tested with a real, working login.
 
+**Also real and tested, installed live:** running inside an actual
+`omarchy-shell` on the machine this was built on (`omarchy plugin add` +
+`install.sh`, updated in place with `omarchy plugin update --yes` after
+each fix) — the panel renders and its bar icon, click-to-open, and account
+rows all work. What flushed out most of the bugs above was exactly this:
+hands-on use, not just static checks.
+
+**In-panel login form (Phase 4, done):** "Add account" is a real form now
+— id, display name, email, password, optional 2FA, optional mailbox
+password — not a terminal. The password goes over the spawned process's
+stdin, never argv, mirroring the first-party network plugin's Wi-Fi
+password handling exactly. `protondrive-accountctl add --json` reads one
+JSON line from stdin and returns one JSON line, sharing the same
+create+verify+rollback path (`perform_add`) the interactive terminal flow
+already used and was tested against. This is *not* the official CLI's
+browser-hand-off login (see below for why that isn't reachable from here)
+— the password is still typed into our form, not Proton's own page — but
+it is a proper native field instead of a CLI prompt.
+
 **Not yet done — the actual gap between this and "finished":**
-- Never run inside a live `omarchy-shell`. The panel's layout, keyboard
-  navigation, and IPC handler are modeled closely on the first-party Dropbox
-  plugin's, but "closely modeled" is not "confirmed working."
-- Never completed a real, successful login — only tested the failure path
-  (see above). A working account is needed to confirm the mount itself,
-  the pause/resume toggle, and quota display end to end.
+- Never completed a real, successful login — every live test so far
+  (interactive and `--json`) exercised the failure path deliberately. A
+  working account is needed to confirm the mount itself, the pause/resume
+  toggle, and quota display end to end.
 - No Nautilus emblem/context-menu extension yet (Phase 3 below).
-- No in-panel login form — "Add account" opens a terminal
-  (`omarchy-launch-tui`) running `protondrive-accountctl add`, because
-  Proton's SRP + 2FA + mailbox-password flow has no browser hand-off to
-  build a native QML form around yet (Phase 4). See "Official Proton Drive
-  SDK/CLI" below for a login flow that does have one, and why it isn't a
-  drop-in fix.
 - No conflict-resolution UI, no per-file "keep offline" pinning beyond
-  rclone's own VFS cache (Phase 4/5).
+  rclone's own VFS cache (Phase 5).
 
 ## Why this shape
 
@@ -99,6 +110,20 @@ a sync/mount story of its own; until then it's most useful as the
 legitimate direct-API path for share-link generation (Phase 3) once mature
 enough to depend on.
 
+**Checked directly whether its session could be reused by rclone instead of
+building a new login flow — it can't.** rclone's protondrive provider
+schema does have `client_uid` / `client_access_token` / `client_refresh_
+token` / `client_salted_key_pass` fields, which looked promising, but
+rclone's own docs label all four "internal use only" — they're where
+rclone caches its *own* SRP session after a password login, not a
+bring-your-own-token slot. Separately, the official CLI's on-disk state
+(`~/.local/share/proton-drive-cli/clientUid.json`) turned out to hold only
+a bare client id, not the session itself — the actual secret material
+lives in the OS keyring under that CLI's own app identity, and Proton's
+API commonly binds a session to the app that requested it, so a token
+extracted from there would likely be rejected coming from rclone even if
+extracted. Built the in-panel login form (above) instead.
+
 ## Prior art: schneipp/omarchy-proton-drive-plugin (found 2026-09-09)
 
 A published, early-stage (5 commits, no version tags) Omarchy plugin:
@@ -106,10 +131,14 @@ A published, early-stage (5 commits, no version tags) Omarchy plugin:
 Worth knowing about, and validates rather than replaces this approach:
 
 - Built on the official CLI above (`proton-drive-cli-bin`, AUR), not
-  rclone — inherits its browser-based login, launched via
-  `omarchy-launch-tui` rather than a hardcoded terminal binary. **Adopted
-  that pattern here** (see Service.qml) — it respects the user's actual
-  configured terminal via `xdg-terminal-exec` instead of assuming one.
+  rclone — inherits its browser-based login, launched (at the time this was
+  checked) via `omarchy-launch-tui` rather than a hardcoded terminal
+  binary. Briefly adopted that same launcher here for the terminal-based
+  add-account flow, since it respects the user's actual configured
+  terminal (`xdg-terminal-exec`) rather than assuming one — since
+  superseded by the in-panel login form above, so no longer used, but
+  worth remembering as the right way to open *any* terminal from a plugin
+  if one is ever needed again.
 - No FUSE mount: since the official CLI has none, it's an app-level
   browser/upload/download tool with a hand-rolled sync loop (diffing
   `activeRevision.claimedSize` / `claimedModificationTime` / `claimedDigests.
@@ -118,10 +147,30 @@ Worth knowing about, and validates rather than replaces this approach:
   isn't one.
 - Single account only.
 
-So the two things this plugin is actually for — a real on-demand FUSE mount,
-and multiple simultaneous accounts — remain unaddressed by anything else
-that exists right now. That's the case for continuing to build this rather
-than switching to or forking theirs, terminal-launch pattern aside.
+## Prior art: edbron/omarchy-cloud-drives PR #2 (found 2026-09-09)
+
+A closer comparison than the other two: [edbron/omarchy-cloud-drives](https://github.com/edbron/omarchy-cloud-drives)
+is a real rclone-based plugin (iCloud Drive, Google Drive, OneDrive) with
+actual FUSE mounts via systemd user units — same core architecture as this
+plugin. [PR #2](https://github.com/edbron/omarchy-cloud-drives/pull/2)
+adds Proton Drive as a fourth provider, also via rclone's `protondrive`
+backend, credentials also sent over stdin rather than argv/disk (same
+pattern used here).
+
+Checked the actual files, not just the PR description: every provider —
+Proton Drive included — mounts at one **fixed path** (`~/Cloud/ProtonDrive`)
+through a generic `PROVIDERS` table keyed by provider type, not by an
+arbitrary account id. One slot per provider, so Proton Drive is
+single-account here too, same structural limitation as the other two.
+There's an unanswered comment on the PR itself asking "Does this support
+multiple proton drive accounts?" — from `@spuder`, the same GitHub user
+this machine's own `~/Code/omarchy` fork traces back to.
+
+So across three independent Proton Drive plugins now surveyed — the
+official-CLI-based one, this cloud-drives one, and Omarchy's own Dropbox
+integration — multiple simultaneous accounts remains a gap nothing else
+has closed. That's the case for continuing to build this rather than
+switching to or forking any of them.
 
 ## Multi-account design
 
@@ -159,15 +208,21 @@ multi-account is mostly bookkeeping:
 
 **Phase 1 — this repo.** Manifest + bar/panel plugin, account CLI, systemd
 template, install/uninstall scripts, unit + smoke tests, `omarchy-plugin-
-validate` passing. Done, unverified end-to-end (see Status above).
+validate` passing. Done.
 
 **Phase 2 — prove it live.**
-- `omarchy plugin add` this repo for real, enable it, confirm the bar icon
-  and panel render and react (click, hover, keyboard nav) inside an actual
-  `omarchy-shell`.
-- `protondrive-accountctl add` against a real Proton Drive account; confirm
-  `rclone about` reports usage/quota correctly and the mount survives
-  reboot/suspend.
+- Done: `omarchy plugin add` + `install.sh` on the machine this was built
+  on, bar icon and panel confirmed rendering and reacting inside a real
+  `omarchy-shell`; kept current with `omarchy plugin update --yes` after
+  each fix.
+- Done, moved up from Phase 4: in-panel login form (id/display name/email/
+  password/2FA/mailbox password), password over stdin never argv — see
+  Status above.
+- Still open: a real, successful `protondrive-accountctl add` against an
+  actual Proton Drive account — every live test so far deliberately used
+  bad credentials to exercise the failure/rollback path. Confirm `rclone
+  about` reports usage/quota correctly and the mount survives
+  reboot/suspend once one succeeds.
 - Add `docs/bar.png` and `docs/panel.png` (the README references screenshots
   nowhere yet — add them once there's a real render to capture).
 
@@ -181,12 +236,7 @@ validate` passing. Done, unverified end-to-end (see Status above).
 - Thunar has no emblem/info-provider API — a `thunar-custom-actions` entry
   can cover the context-menu action there, but not status overlays.
 
-**Phase 4 — native login + pinning.**
-- Replace the terminal-based "Add account" with an in-panel form once
-  there's a safe way to drive `rclone config create`'s prompts (username,
-  password, 2FA, mailbox password) from QML without the plugin process
-  itself ever holding the password in memory longer than the single RPC
-  call needs.
+**Phase 4 — pinning.** (native login form done, moved to Phase 2 above)
 - Per-file "always keep offline" pin, layered on top of rclone's VFS cache
   rather than replacing it — rclone doesn't have this concept natively.
 - Conflict list surfaced in the panel when `rclone mount`'s own conflict

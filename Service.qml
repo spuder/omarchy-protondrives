@@ -22,6 +22,14 @@ Item {
   property string lastError: ""
   property string actionStatus: ""
 
+  // In-panel login form state (see Panel.qml's LoginForm component). No
+  // terminal involved: the form's fields go straight to loginProcess over
+  // stdin, the same way the first-party network plugin sends Wi-Fi
+  // passwords ("the password goes over stdin, never argv").
+  property bool loginFormOpen: false
+  property bool loginBusy: loginProcess.running
+  property string loginError: ""
+
   // Optimistic per-account pause/resume, same idea as the Dropbox plugin's
   // single `_desired` flag but keyed by account id since several accounts
   // can be mid-toggle at once.
@@ -105,23 +113,37 @@ Item {
   }
 
   function beginAddAccount() {
-    // Proton's SRP + 2FA + mailbox-password login has no browser hand-off to
-    // shell out to (unlike Dropbox's OAuth link), so v0.1 opens a terminal
-    // running the interactive helper rather than a native form. See PLAN.md
-    // Phase 4 for the planned in-panel login form.
-    actionStatus = "Opening Proton Drive login in a terminal…"
-    // omarchy-launch-tui respects the user's actual configured terminal
-    // (xdg-terminal-exec) instead of assuming one, and applies proper
-    // window styling/app-id — better than shelling out to a hardcoded
-    // terminal binary directly. The bash -c trailer holds the window open
-    // and reports the exit code after the script finishes, terminal-
-    // agnostically, so a failure (bad id, rclone missing, sign-in
-    // rejected) is readable instead of the window just vanishing — that
-    // silent-vanish was a real bug in an earlier version of this call,
-    // worth not regressing back into. Assumes pluginDir has no single
-    // quote in it, true for any path this plugin is normally installed at.
-    var script = "'" + root.pluginDir + "bin/protondrive-accountctl' add; ec=$?; echo; read -rp 'Press Enter to close...'; exit $ec"
-    Quickshell.execDetached(["omarchy-launch-tui", "--app-id=protondrive-login", "bash", "-c", script])
+    if (loginProcess.running) return
+    loginError = ""
+    loginFormOpen = true
+  }
+
+  function cancelLogin() {
+    if (loginProcess.running) return  // let an in-flight attempt finish
+    loginFormOpen = false
+    loginError = ""
+  }
+
+  // payload: {id, displayName, username, password, twofa, mailboxPassword}.
+  // Proton's SRP + 2FA + mailbox-password login has no browser hand-off to
+  // delegate to (unlike Dropbox's OAuth link) — rclone's protondrive
+  // backend does the SRP handshake itself, which means it needs the actual
+  // password, not a token. So this is a real password field in a real
+  // panel form rather than a terminal prompt, but it's still our form the
+  // password is typed into, not Proton's own login page the way the
+  // official Proton Drive CLI's browser-based flow is (see PLAN.md — that
+  // CLI's sessions turned out not to be usable here at all: rclone's own
+  // provider schema marks its equivalent client_uid/client_access_token/
+  // client_refresh_token fields "internal use only", and even if extracted
+  // a token minted for a different app is unlikely to be honoured by
+  // Proton's API for this one). --json on protondrive-accountctl reads
+  // this same payload as one JSON line from stdin instead of prompting.
+  function submitLogin(payload) {
+    if (loginProcess.running) return
+    loginError = ""
+    loginProcess.payload = JSON.stringify(payload)
+    loginProcess.command = ["python3", root.pluginDir + "bin/protondrive-accountctl", "add", "--json"]
+    loginProcess.running = true
   }
 
   function runControl(command) {
@@ -165,6 +187,35 @@ Item {
       var stderr = String(statusStderr.text || root._statusError || "")
       if (exitCode === 0) root.applyStatus(stdout)
       else root.lastError = root.elide(stderr || stdout || "Could not read Proton Drive status")
+    }
+  }
+
+  Process {
+    id: loginProcess
+    running: false
+    command: []
+    property string payload: ""
+    stdinEnabled: true
+    onStarted: {
+      write(payload + "\n")
+      payload = ""  // cleared the instant it's sent — nothing sensitive kept around
+    }
+    stdout: StdioCollector { id: loginStdout; waitForEnd: true }
+    stderr: StdioCollector { id: loginStderr; waitForEnd: true }
+    onExited: function(exitCode) {
+      var raw = String(loginStdout.text || "").trim()
+      var parsed = null
+      try { parsed = raw !== "" ? JSON.parse(raw) : null } catch (e) { parsed = null }
+      if (parsed && parsed.ok === true) {
+        root.loginFormOpen = false
+        root.loginError = ""
+        root.actionStatus = "Signed in"
+        actionStatusTimer.restart()
+      } else {
+        var detail = (parsed && parsed.error) || String(loginStderr.text || "").trim() || "Sign-in failed"
+        root.loginError = root.elide(detail)
+      }
+      delayedRefresh.restart()
     }
   }
 

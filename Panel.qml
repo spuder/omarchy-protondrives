@@ -208,6 +208,12 @@ Panel {
           }
 
           AddAccountButton {
+            visible: !proton.loginFormOpen
+            width: parent.width
+          }
+
+          LoginForm {
+            visible: proton.loginFormOpen
             width: parent.width
           }
 
@@ -294,7 +300,7 @@ Panel {
         Text {
           textFormat: Text.PlainText
           Layout.fillWidth: true
-          text: "Opens the login helper in a terminal"
+          text: "Your password goes straight to rclone over stdin — never typed anywhere else"
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
@@ -309,6 +315,203 @@ Panel {
         Layout.alignment: Qt.AlignVCenter
         onClicked: proton.beginAddAccount()
       }
+    }
+  }
+
+  component LoginForm: Column {
+    id: loginForm
+    spacing: Style.space(8)
+
+    property string fId: ""
+    property string fDisplayName: ""
+    property string fUsername: ""
+    property string fPassword: ""
+    property bool fHas2fa: false
+    property string f2fa: ""
+    property bool fHasMailboxPassword: false
+    property string fMailboxPassword: ""
+
+    readonly property bool canSubmit: fId.trim() !== "" && fUsername.trim() !== "" && fPassword !== "" && !proton.loginBusy
+
+    function reset() {
+      fId = ""; fDisplayName = ""; fUsername = ""; fPassword = ""
+      fHas2fa = false; f2fa = ""; fHasMailboxPassword = false; fMailboxPassword = ""
+    }
+
+    function submit() {
+      if (!canSubmit) return
+      proton.submitLogin({
+        id: fId.trim().toLowerCase(),
+        displayName: fDisplayName.trim(),
+        username: fUsername.trim(),
+        password: fPassword,
+        twofa: fHas2fa ? f2fa : "",
+        mailboxPassword: fHasMailboxPassword ? fMailboxPassword : ""
+      })
+    }
+
+    onVisibleChanged: if (visible) { reset(); Qt.callLater(function() { idField.forceActiveFocus() }) }
+
+    Connections {
+      target: proton
+      function onLoginFormOpenChanged() { if (!proton.loginFormOpen) loginForm.reset() }
+    }
+
+    PanelSectionHeader {
+      text: "SIGN IN"
+      foreground: root.foreground
+      fontFamily: root.fontFamily
+    }
+
+    LoginField {
+      id: idField
+      label: "Account id (e.g. personal)"
+      text: loginForm.fId
+      onTextEdited: loginForm.fId = text
+      onAccepted: loginForm.submit()
+      KeyNavigation.tab: displayNameField
+    }
+    LoginField {
+      id: displayNameField
+      label: "Display name (optional)"
+      text: loginForm.fDisplayName
+      onTextEdited: loginForm.fDisplayName = text
+      onAccepted: loginForm.submit()
+      KeyNavigation.tab: usernameField
+    }
+    LoginField {
+      id: usernameField
+      label: "Proton account email"
+      text: loginForm.fUsername
+      onTextEdited: loginForm.fUsername = text
+      onAccepted: loginForm.submit()
+      KeyNavigation.tab: passwordField
+    }
+    LoginField {
+      id: passwordField
+      label: "Proton account password"
+      text: loginForm.fPassword
+      password: true
+      onTextEdited: loginForm.fPassword = text
+      onAccepted: loginForm.submit()
+      KeyNavigation.tab: twofaCheck
+    }
+
+    RowLayout {
+      width: parent.width
+      spacing: Style.space(6)
+      CheckBox {
+        id: twofaCheck
+        checked: loginForm.fHas2fa
+        onToggled: loginForm.fHas2fa = checked
+        KeyNavigation.tab: mailboxCheck
+      }
+      Text {
+        text: "Two-factor authentication enabled"
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+      }
+    }
+    LoginField {
+      label: "2FA code"
+      visible: loginForm.fHas2fa
+      text: loginForm.f2fa
+      onTextEdited: loginForm.f2fa = text
+      onAccepted: loginForm.submit()
+    }
+
+    RowLayout {
+      width: parent.width
+      spacing: Style.space(6)
+      CheckBox {
+        id: mailboxCheck
+        checked: loginForm.fHasMailboxPassword
+        onToggled: loginForm.fHasMailboxPassword = checked
+      }
+      Text {
+        text: "Separate mailbox password (old accounts only)"
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.bodySmall
+        wrapMode: Text.WordWrap
+        Layout.fillWidth: true
+      }
+    }
+    LoginField {
+      label: "Mailbox password"
+      visible: loginForm.fHasMailboxPassword
+      text: loginForm.fMailboxPassword
+      password: true
+      onTextEdited: loginForm.fMailboxPassword = text
+      onAccepted: loginForm.submit()
+    }
+
+    Text {
+      textFormat: Text.PlainText
+      visible: proton.loginError !== ""
+      width: parent.width
+      text: proton.loginError
+      color: root.urgent
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.bodySmall
+      wrapMode: Text.WordWrap
+    }
+
+    RowLayout {
+      width: parent.width
+      spacing: Style.space(8)
+
+      PanelActionButton {
+        iconText: "×"
+        foreground: root.foreground
+        fontFamily: root.fontFamily
+        enabled: !proton.loginBusy
+        onClicked: proton.cancelLogin()
+      }
+      Text {
+        Layout.fillWidth: true
+        text: proton.loginBusy ? "Signing in…" : ""
+        color: root.dim
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+      }
+      PanelActionButton {
+        iconText: "✓"
+        foreground: root.foreground
+        fontFamily: root.fontFamily
+        enabled: loginForm.canSubmit
+        onClicked: loginForm.submit()
+      }
+    }
+  }
+
+  component LoginField: ColumnLayout {
+    id: fieldRoot
+    property alias label: labelText.text
+    property alias text: input.text
+    property bool password: false
+    signal textEdited()
+    signal accepted()
+
+    width: parent ? parent.width : implicitWidth
+    spacing: Style.space(2)
+
+    Text {
+      id: labelText
+      color: root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+    }
+
+    TextField {
+      id: input
+      Layout.fillWidth: true
+      echoMode: fieldRoot.password ? TextInput.Password : TextInput.Normal
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.body
+      onTextChanged: fieldRoot.textEdited()
+      Keys.onReturnPressed: fieldRoot.accepted()
     }
   }
 
