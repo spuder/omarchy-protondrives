@@ -29,6 +29,7 @@ config or rclone — used by test/status-fixture.sh and for previewing the
 panel's layout before any account is actually configured.
 """
 
+import configparser
 import json
 import shutil
 import subprocess
@@ -96,6 +97,23 @@ def load_accounts():
         return []
     accounts = data.get("accounts") if isinstance(data, dict) else None
     return accounts if isinstance(accounts, list) else []
+
+
+def config_has_credentials(config_path):
+    """True if the account's rclone.conf has a username set — a cheap local
+    check that doesn't need a network round trip, and doesn't require the
+    section name to match the account id (rclone writes it from the remote
+    name passed to `config create`, which has always been the account id
+    here, but this reads whichever section exists rather than assuming)."""
+    parser = configparser.ConfigParser()
+    try:
+        parser.read(config_path)
+    except configparser.Error:
+        return False
+    for section in parser.sections():
+        if parser.get(section, "username", fallback="").strip():
+            return True
+    return False
 
 
 def unit_active(account_id):
@@ -177,7 +195,15 @@ def account_status(rclone_path, entry):
     if rclone_path is None:
         result["lastError"] = "rclone is not installed"
         return result
-    if not config_path.exists():
+    if not config_path.exists() or not config_has_credentials(config_path):
+        # A config file can exist without ever having signed in — a login
+        # that failed partway (or, before this was fixed, `rclone config
+        # create` silently defaulting unanswered questions instead of
+        # prompting, see protondrive-accountctl) leaves a bare `type =
+        # protondrive` stub with no username. Checking locally, instead of
+        # letting `rclone about` fail against it, avoids reporting the
+        # misleading "expired" below for an account that never actually
+        # signed in — a real, previously-fixed point of confusion.
         result["lastError"] = "Not signed in yet"
         return result
 
