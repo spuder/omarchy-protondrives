@@ -96,6 +96,17 @@ can't tell you, and what nobody has done yet, is confirm the panel actually
 renders and reacts correctly inside a live `omarchy-shell` — that's the
 first thing to check by hand before this stops being a proof of concept.
 
+## Updating a live install
+
+`omarchy plugin update spencerowen.protondrive` pulls new code onto disk,
+and `omarchy-shell shell rescanPlugins` picks up manifest/new-plugin
+changes — but an already-active `bar-widget` doesn't reload its compiled
+QML from either one. A change to `Panel.qml`/`Service.qml` structure (new
+components, properties, signals) needs a full `omarchy restart shell` to
+actually take effect, or the bar keeps running the old in-memory version
+even though the files on disk are current. Found this the hard way once
+already — worth not rediscovering it.
+
 ## Design docs
 
 The reasoning behind the architecture — why rclone, why FUSE-mount over a
