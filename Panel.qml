@@ -173,7 +173,7 @@ Panel {
           PanelHero {
             id: hero
             width: parent.width
-            title: "Proton Drive"
+            title: "Proton Drives"
             meta: proton.aggregateStatusText
             foreground: root.foreground
             fontFamily: root.fontFamily

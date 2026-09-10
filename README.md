@@ -1,4 +1,4 @@
-<h1>omarchy-protondrive</h1>
+<h1>Proton Drives</h1>
 
 A native, Dropbox-style Proton Drive integration for [Omarchy](https://omarchy.org/) — a bar
 widget with per-account status and storage, backed by real FUSE mounts

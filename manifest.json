@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "id": "spencerowen.protondrive",
-  "name": "Proton Drive",
+  "name": "Proton Drives",
   "version": "0.1.0",
   "author": "Spencer Owen",
   "license": "MIT",
@@ -13,13 +13,15 @@
     "barWidget": "Panel.qml"
   },
   "barWidget": {
-    "displayName": "Proton Drive",
+    "displayName": "Proton Drives",
     "description": "Log in to one or more Proton Drive accounts, see sync status and storage per account, and pause or resume syncing.",
     "category": "Files",
     "aliases": [
       "protondrive",
+      "protondrives",
       "proton",
-      "drive"
+      "drive",
+      "drives"
     ],
     "allowMultiple": false,
     "defaultSection": "right",
