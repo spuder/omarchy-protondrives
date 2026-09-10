@@ -349,21 +349,6 @@ Panel {
       fontFamily: root.fontFamily
     }
 
-    Text {
-      textFormat: Text.PlainText
-      width: parent.width
-      text: "Goes straight from this form to rclone's Proton Drive connection over " +
-            "this process's own stdin — never a command-line argument, never written " +
-            "to disk, never logged. There's no browser hand-off for this login the way " +
-            "some other Proton Drive tools offer: rclone runs Proton's sign-in protocol " +
-            "itself, which needs the real password locally to do that math, so it can't " +
-            "delegate to a page the way those tools do."
-      color: root.dim
-      font.family: root.fontFamily
-      font.pixelSize: Style.font.caption
-      wrapMode: Text.WordWrap
-    }
-
     LoginField {
       id: idField
       label: "Account id (e.g. personal)"

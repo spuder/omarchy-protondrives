@@ -240,8 +240,14 @@ Item {
         root.actionStatus = "Signed in"
         actionStatusTimer.restart()
       } else {
+        // Not elide()'d, unlike the other status/tooltip strings in this
+        // file — this is the one place the user is actively reading a
+        // failure to diagnose it, in a form with room to show it, inside
+        // a Flickable that already scrolls. elide()'s 140-char cut was
+        // real: it was cutting rclone's actual error message off mid-word
+        // before it ever reached the panel, not just wrapping visually.
         var detail = (parsed && parsed.error) || String(loginStderr.text || "").trim() || "Sign-in failed"
-        root.loginError = root.elide(detail)
+        root.loginError = detail
       }
       delayedRefresh.restart()
     }
