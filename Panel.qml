@@ -322,40 +322,26 @@ Panel {
     id: loginForm
     spacing: Style.space(8)
 
-    property string fId: ""
-    property string fDisplayName: ""
-    property string fUsername: ""
-    property string fPassword: ""
-    property bool fHas2fa: false
-    property string f2fa: ""
-    property bool fHasMailboxPassword: false
-    property string fMailboxPassword: ""
-
-    readonly property bool canSubmit: fId.trim() !== "" && fUsername.trim() !== "" && fPassword !== "" && !proton.loginBusy
-
-    function reset() {
-      fId = ""; fDisplayName = ""; fUsername = ""; fPassword = ""
-      fHas2fa = false; f2fa = ""; fHasMailboxPassword = false; fMailboxPassword = ""
-    }
+    // Bound straight to Service.qml's persistent form* properties, not
+    // local state — see the comment there for why (typed fields were
+    // being wiped on every panel close/reopen otherwise, e.g. clicking
+    // out to go copy a password from somewhere else).
+    readonly property bool canSubmit: proton.formId.trim() !== "" && proton.formUsername.trim() !== "" &&
+                                       proton.formPassword !== "" && !proton.loginBusy
 
     function submit() {
       if (!canSubmit) return
       proton.submitLogin({
-        id: fId.trim().toLowerCase(),
-        displayName: fDisplayName.trim(),
-        username: fUsername.trim(),
-        password: fPassword,
-        twofa: fHas2fa ? f2fa : "",
-        mailboxPassword: fHasMailboxPassword ? fMailboxPassword : ""
+        id: proton.formId.trim().toLowerCase(),
+        displayName: proton.formDisplayName.trim(),
+        username: proton.formUsername.trim(),
+        password: proton.formPassword,
+        twofa: proton.formHas2fa ? proton.form2fa : "",
+        mailboxPassword: proton.formHasMailboxPassword ? proton.formMailboxPassword : ""
       })
     }
 
-    onVisibleChanged: if (visible) { reset(); Qt.callLater(function() { idField.forceActiveFocus() }) }
-
-    Connections {
-      target: proton
-      function onLoginFormOpenChanged() { if (!proton.loginFormOpen) loginForm.reset() }
-    }
+    onVisibleChanged: if (visible) Qt.callLater(function() { idField.forceActiveFocus() })
 
     PanelSectionHeader {
       text: "SIGN IN"
@@ -363,36 +349,51 @@ Panel {
       fontFamily: root.fontFamily
     }
 
+    Text {
+      textFormat: Text.PlainText
+      width: parent.width
+      text: "Goes straight from this form to rclone's Proton Drive connection over " +
+            "this process's own stdin — never a command-line argument, never written " +
+            "to disk, never logged. There's no browser hand-off for this login the way " +
+            "some other Proton Drive tools offer: rclone runs Proton's sign-in protocol " +
+            "itself, which needs the real password locally to do that math, so it can't " +
+            "delegate to a page the way those tools do."
+      color: root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+      wrapMode: Text.WordWrap
+    }
+
     LoginField {
       id: idField
       label: "Account id (e.g. personal)"
-      text: loginForm.fId
-      onTextEdited: loginForm.fId = text
+      text: proton.formId
+      onTextEdited: proton.formId = text
       onAccepted: loginForm.submit()
       KeyNavigation.tab: displayNameField
     }
     LoginField {
       id: displayNameField
       label: "Display name (optional)"
-      text: loginForm.fDisplayName
-      onTextEdited: loginForm.fDisplayName = text
+      text: proton.formDisplayName
+      onTextEdited: proton.formDisplayName = text
       onAccepted: loginForm.submit()
       KeyNavigation.tab: usernameField
     }
     LoginField {
       id: usernameField
       label: "Proton account email"
-      text: loginForm.fUsername
-      onTextEdited: loginForm.fUsername = text
+      text: proton.formUsername
+      onTextEdited: proton.formUsername = text
       onAccepted: loginForm.submit()
       KeyNavigation.tab: passwordField
     }
     LoginField {
       id: passwordField
       label: "Proton account password"
-      text: loginForm.fPassword
+      text: proton.formPassword
       password: true
-      onTextEdited: loginForm.fPassword = text
+      onTextEdited: proton.formPassword = text
       onAccepted: loginForm.submit()
       KeyNavigation.tab: twofaCheck
     }
@@ -402,8 +403,8 @@ Panel {
       spacing: Style.space(6)
       CheckBox {
         id: twofaCheck
-        checked: loginForm.fHas2fa
-        onToggled: loginForm.fHas2fa = checked
+        checked: proton.formHas2fa
+        onToggled: proton.formHas2fa = checked
         KeyNavigation.tab: mailboxCheck
       }
       Text {
@@ -415,9 +416,9 @@ Panel {
     }
     LoginField {
       label: "2FA code"
-      visible: loginForm.fHas2fa
-      text: loginForm.f2fa
-      onTextEdited: loginForm.f2fa = text
+      visible: proton.formHas2fa
+      text: proton.form2fa
+      onTextEdited: proton.form2fa = text
       onAccepted: loginForm.submit()
     }
 
@@ -426,8 +427,8 @@ Panel {
       spacing: Style.space(6)
       CheckBox {
         id: mailboxCheck
-        checked: loginForm.fHasMailboxPassword
-        onToggled: loginForm.fHasMailboxPassword = checked
+        checked: proton.formHasMailboxPassword
+        onToggled: proton.formHasMailboxPassword = checked
       }
       Text {
         text: "Separate mailbox password (old accounts only)"
@@ -440,10 +441,10 @@ Panel {
     }
     LoginField {
       label: "Mailbox password"
-      visible: loginForm.fHasMailboxPassword
-      text: loginForm.fMailboxPassword
+      visible: proton.formHasMailboxPassword
+      text: proton.formMailboxPassword
       password: true
-      onTextEdited: loginForm.fMailboxPassword = text
+      onTextEdited: proton.formMailboxPassword = text
       onAccepted: loginForm.submit()
     }
 
@@ -469,12 +470,26 @@ Panel {
         enabled: !proton.loginBusy
         onClicked: proton.cancelLogin()
       }
+
+      BusyIndicator {
+        // Contacting Proton is one blocking `rclone config create` call
+        // (up to 60s) followed by one `rclone about` verification (up to
+        // 30s) — no percentage to report, so this is deliberately
+        // indeterminate rather than a fake progress bar. Was previously
+        // just static "Signing in…" text, easy to miss and gave no sense
+        // that anything was actually moving.
+        Layout.preferredWidth: Style.space(18)
+        Layout.preferredHeight: Style.space(18)
+        visible: proton.loginBusy
+        running: proton.loginBusy
+      }
       Text {
         Layout.fillWidth: true
-        text: proton.loginBusy ? "Signing in…" : ""
+        text: proton.loginBusy ? "Signing in — this can take up to a minute or two…" : ""
         color: root.dim
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
+        elide: Text.ElideRight
       }
       PanelActionButton {
         iconText: "✓"

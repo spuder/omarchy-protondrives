@@ -26,9 +26,31 @@ Item {
   // terminal involved: the form's fields go straight to loginProcess over
   // stdin, the same way the first-party network plugin sends Wi-Fi
   // passwords ("the password goes over stdin, never argv").
+  //
+  // The field values live here, not as local properties on LoginForm
+  // itself — KeyboardPanel only toggles visible/opacity on close, it
+  // doesn't destroy its content, but the *form* was still losing every
+  // typed field the moment the panel closed and reopened (e.g. clicking
+  // out to go copy a password from elsewhere). A component instance is
+  // one thing to keep alive across that; the Service instance below,
+  // which was never being torn down in the first place, is the one place
+  // that's actually guaranteed to survive it.
   property bool loginFormOpen: false
   property bool loginBusy: loginProcess.running
   property string loginError: ""
+  property string formId: ""
+  property string formDisplayName: ""
+  property string formUsername: ""
+  property string formPassword: ""
+  property bool formHas2fa: false
+  property string form2fa: ""
+  property bool formHasMailboxPassword: false
+  property string formMailboxPassword: ""
+
+  function resetLoginForm() {
+    formId = ""; formDisplayName = ""; formUsername = ""; formPassword = ""
+    formHas2fa = false; form2fa = ""; formHasMailboxPassword = false; formMailboxPassword = ""
+  }
 
   // Optimistic per-account pause/resume, same idea as the Dropbox plugin's
   // single `_desired` flag but keyed by account id since several accounts
@@ -115,6 +137,10 @@ Item {
   function beginAddAccount() {
     if (loginProcess.running) return
     loginError = ""
+    // Deliberately not resetLoginForm() here — reopening the form (the
+    // panel was just closed and reopened, or this is a second click) must
+    // not wipe fields the user already typed. Only cancelLogin() and a
+    // successful submitLogin() clear them.
     loginFormOpen = true
   }
 
@@ -122,6 +148,7 @@ Item {
     if (loginProcess.running) return  // let an in-flight attempt finish
     loginFormOpen = false
     loginError = ""
+    resetLoginForm()
   }
 
   // payload: {id, displayName, username, password, twofa, mailboxPassword}.
@@ -209,6 +236,7 @@ Item {
       if (parsed && parsed.ok === true) {
         root.loginFormOpen = false
         root.loginError = ""
+        root.resetLoginForm()
         root.actionStatus = "Signed in"
         actionStatusTimer.restart()
       } else {
