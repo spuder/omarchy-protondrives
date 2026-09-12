@@ -310,23 +310,31 @@ def cmd_remove(args):
 
 
 def _control(args, action, unit_state):
+    """action is "enable" or "disable", always combined with --now: pause and
+    resume must change both current state and boot persistence together, or
+    the panel's toggle lies about what happens on the next reboot. Plain
+    start/stop only changed the former -- add/resume looked like they took
+    effect, but the unit stayed disabled, so accounts silently reverted to
+    disconnected on every reboot until someone ran `systemctl --user enable
+    --now` by hand. See PLAN.md / the "why are drives disconnected on boot"
+    report this fixes."""
     accounts = load_accounts()
     entry = find_account(accounts, args.id)
     if not entry:
         fail(f"no such account: {args.id}")
     unit = UNIT_TEMPLATE.format(id=args.id)
-    exit_code = subprocess.call(["systemctl", "--user", action, unit])
+    exit_code = subprocess.call(["systemctl", "--user", action, "--now", unit])
     if exit_code != 0:
-        fail(f"systemctl --user {action} {unit} failed (exit {exit_code})")
+        fail(f"systemctl --user {action} --now {unit} failed (exit {exit_code})")
     print(f"{args.id}: {unit_state}")
 
 
 def cmd_pause(args):
-    _control(args, "stop", "paused")
+    _control(args, "disable", "paused")
 
 
 def cmd_resume(args):
-    _control(args, "start", "resumed")
+    _control(args, "enable", "resumed")
 
 
 def _require_rclone():
