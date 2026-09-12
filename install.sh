@@ -6,7 +6,7 @@
 # omarchy-plugin-validate). Third-party plugins install themselves.
 #
 # Usage, run once, after `omarchy plugin add <this repo> --enable`:
-#   ~/.config/omarchy/plugins/spencerowen.protondrive/install.sh
+#   ~/.config/omarchy/plugins/spuder.protondrive/install.sh
 # Safe to run from anywhere: everything below is relative to this script's
 # own directory, not the caller's.
 set -euo pipefail
@@ -26,7 +26,7 @@ install -Dm644 systemd/omarchy-protondrive@.service \
 systemctl --user daemon-reload
 
 echo "Adding Proton Drive to the bar..."
-omarchy-plugin-enable spencerowen.protondrive
+omarchy-plugin-enable spuder.protondrive
 
 cat <<MSG
 

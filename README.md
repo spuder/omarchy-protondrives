@@ -25,7 +25,7 @@ tab required.
 
 ```bash
 omarchy plugin add https://github.com/spuder/omarchy-protondrive.git --enable
-~/.config/omarchy/plugins/spencerowen.protondrive/install.sh
+~/.config/omarchy/plugins/spuder.protondrive/install.sh
 ```
 
 The first line clones and enables the widget; the second installs rclone
@@ -36,7 +36,7 @@ and password straight to rclone over the process's own stdin, never a
 command-line argument, never written to disk, never logged. Add as many
 accounts as you like; each shows up as its own row.
 
-Remove with `~/.config/omarchy/plugins/spencerowen.protondrive/uninstall.sh`
+Remove with `~/.config/omarchy/plugins/spuder.protondrive/uninstall.sh`
 (your signed-in accounts and synced files are left alone; see the script
 for exactly what it does and doesn't touch).
 
