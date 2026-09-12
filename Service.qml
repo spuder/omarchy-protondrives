@@ -176,6 +176,11 @@ Item {
   function runControl(command) {
     _controlOutput = ""
     _controlError = ""
+    // command is ["pause"|"resume"|"remove", accountId], per toggleAccount
+    // below — kept so a failure can roll back that account's optimistic
+    // _desiredActive override instead of leaving the toggle stuck showing
+    // a state that was never actually reached.
+    controlProcess.accountId = command.length > 1 ? command[1] : ""
     controlProcess.command = ["python3", root.pluginDir + "bin/protondrive-accountctl"].concat(command)
     controlProcess.running = true
   }
@@ -257,6 +262,7 @@ Item {
     id: controlProcess
     running: false
     command: []
+    property string accountId: ""
     stdout: StdioCollector { id: controlStdout; waitForEnd: true; onStreamFinished: root._controlOutput = text }
     stderr: StdioCollector { id: controlStderr; waitForEnd: true; onStreamFinished: root._controlError = text }
     onExited: function(exitCode) {
@@ -266,6 +272,14 @@ Item {
         root.lastError = root.elide(stderr || stdout || "Proton Drive command failed")
         root.actionStatus = root.lastError
         actionStatusTimer.restart()
+        // The optimistic toggle in toggleAccount() guessed wrong -- drop it
+        // so the UI reflects the real (unchanged) state on the next
+        // refresh instead of showing a pause/resume that never happened.
+        if (accountId) {
+          var reverted = Object.assign({}, root._desiredActive)
+          delete reverted[accountId]
+          root._desiredActive = reverted
+        }
       }
       delayedRefresh.restart()
     }
