@@ -13,7 +13,7 @@ if command -v protondrive-accountctl >/dev/null 2>&1; then
   done < <(protondrive-accountctl list 2>/dev/null | grep -v '^No accounts' || true)
 fi
 
-omarchy-plugin-disable spencerowen.protondrive || true
+omarchy-plugin-disable spuder.protondrive || true
 
 rm -f "$HOME/.local/bin/protondrive-status" \
       "$HOME/.local/bin/protondrive-accountctl" \

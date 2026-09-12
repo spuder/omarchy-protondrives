@@ -14,8 +14,8 @@ import "Model.js" as Model
 // list, since that's the whole point of this plugin. See PLAN.md.
 Panel {
   id: root
-  moduleName: "spencerowen.protondrive"
-  ipcTarget: "spencerowen.protondrive"
+  moduleName: "spuder.protondrive"
+  ipcTarget: "spuder.protondrive"
   manageIpc: false
 
   property string focusSection: "add"
