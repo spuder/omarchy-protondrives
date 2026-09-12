@@ -28,8 +28,11 @@ omarchy plugin add https://github.com/spuder/omarchy-protondrives.git --enable
 ~/.config/omarchy/plugins/spuder.protondrive/install.sh
 ```
 
-The first line clones and enables the widget; the second installs rclone
-and the helper scripts it needs. No manual `git clone` required.
+The first line clones and enables the widget; the second installs this
+plugin's dependencies — [rclone](https://rclone.org/) (the FUSE mount
+itself), `fuse3` (so `rclone mount` and `fusermount3` work), and
+`nautilus-python` (for the Nautilus emblem/context-menu extension) — plus
+the helper scripts. No manual `git clone` required.
 
 Click "Add a Proton Drive account" in the panel, a real in-app form, email
 and password straight to rclone over the process's own stdin, never a
