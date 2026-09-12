@@ -157,6 +157,13 @@ def perform_add(rclone, account_id, display_name, username, password, twofa, mai
         return False, f"account '{account_id}' already exists — remove it first: protondrive-accountctl remove {account_id}"
     if not username or not password:
         return False, "email and password are required"
+    # display_name becomes a path component below (MOUNT_ROOT / display_name).
+    # pathlib's / silently discards MOUNT_ROOT entirely when the right side
+    # is an absolute path, so an unchecked display_name like "/etc" would
+    # send the mount somewhere other than under ~/ProtonDrive. "/" has no
+    # legitimate use in a display name anyway.
+    if "/" in display_name or "\x00" in display_name:
+        return False, "display name can't contain '/'"
 
     account_dir = STATE_HOME / account_id
     ensure_private_dir(account_dir)

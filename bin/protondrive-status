@@ -90,6 +90,11 @@ def command_output(command, timeout=4):
 def load_accounts():
     if not ACCOUNTS_FILE.exists():
         return []
+    if ACCOUNTS_FILE.is_symlink():
+        # Matches protondrive-accountctl's own refusal to follow a symlinked
+        # accounts file -- this script just degrades to "no accounts" instead
+        # of accountctl's fail()/exit, since a status query must never raise.
+        return []
     try:
         with ACCOUNTS_FILE.open("r", encoding="utf-8") as handle:
             data = json.load(handle)
