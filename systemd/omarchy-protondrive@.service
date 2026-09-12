@@ -1,6 +1,6 @@
 [Unit]
 Description=Proton Drive mount (%i)
-Documentation=https://github.com/spuder/omarchy-protondrive
+Documentation=https://github.com/spuder/omarchy-protondrives
 After=network-online.target
 Wants=network-online.target
 
