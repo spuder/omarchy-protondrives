@@ -244,7 +244,7 @@ validate` passing. Done.
 
 **Phase 5 — packaging.**
 - AUR package for the helper scripts + systemd unit, so `install.sh`
-  collapses to `omarchy-pkg-add omarchy-protondrive`.
+  collapses to `omarchy-pkg-add omarchy-protondrives`.
 - CI: run `test/model.test.js`, `test/status-fixture.sh`, and `omarchy-
   plugin-validate` on every push.
 

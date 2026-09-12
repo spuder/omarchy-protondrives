@@ -24,7 +24,7 @@ tab required.
 ## Install
 
 ```bash
-omarchy plugin add https://github.com/spuder/omarchy-protondrive.git --enable
+omarchy plugin add https://github.com/spuder/omarchy-protondrives.git --enable
 ~/.config/omarchy/plugins/spuder.protondrive/install.sh
 ```
 
