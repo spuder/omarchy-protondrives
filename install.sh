@@ -12,8 +12,8 @@
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
-echo "Installing rclone and the Nautilus emblem/context-menu extension..."
-omarchy-pkg-add rclone nautilus-python
+echo "Installing rclone, fuse3, and the Nautilus emblem/context-menu extension..."
+omarchy-pkg-add rclone fuse3 nautilus-python
 
 echo "Installing helper scripts to ~/.local/bin..."
 install -Dm755 bin/protondrive-status "$HOME/.local/bin/protondrive-status"
