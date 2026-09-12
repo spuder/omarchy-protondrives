@@ -145,7 +145,7 @@ def friendly_error(detail):
     return None
 
 
-def perform_add(rclone, account_id, display_name, username, password, twofa, mailbox_password):
+def perform_add(rclone, account_id, display_name, username, password, twofa, mailbox_password, mount_root=None):
     """The actual create+verify+register, shared by the interactive prompt
     flow and --json (used by Panel.qml's login form — see Service.qml).
     Returns (ok, message). Never raises."""
@@ -165,9 +165,15 @@ def perform_add(rclone, account_id, display_name, username, password, twofa, mai
     if "/" in display_name or "\x00" in display_name:
         return False, "display name can't contain '/'"
 
+    # mount_root: the "Mount root" plugin setting (manifest.json's
+    # barWidget.defaults.mountRoot), passed through by Service.qml's
+    # submitLogin(). Falls back to MOUNT_ROOT for direct terminal use
+    # (protondrive-accountctl add), which has no settings to read.
+    root_path = Path(os.path.expanduser(mount_root)).resolve() if mount_root else MOUNT_ROOT
+
     account_dir = STATE_HOME / account_id
     ensure_private_dir(account_dir)
-    mount_path = MOUNT_ROOT / display_name
+    mount_path = root_path / display_name
     mount_path.mkdir(parents=True, exist_ok=True)
     config_path = account_dir / "rclone.conf"
 
@@ -256,6 +262,7 @@ def cmd_add(args):
             rclone, account_id, display_name,
             str(payload.get("username", "")), str(payload.get("password", "")),
             str(payload.get("twofa", "")), str(payload.get("mailboxPassword", "")),
+            mount_root=str(payload.get("mountRoot", "")).strip() or None,
         )
         print(json.dumps({"ok": ok, "error": "" if ok else message, "message": message if ok else ""}))
         sys.exit(0 if ok else 1)

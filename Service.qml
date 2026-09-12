@@ -168,7 +168,12 @@ Item {
   function submitLogin(payload) {
     if (loginProcess.running) return
     loginError = ""
-    loginProcess.payload = JSON.stringify(payload)
+    // mountRoot: the plugin's "Mount root" setting (manifest.json's
+    // barWidget.defaults.mountRoot) -- accountctl.perform_add() uses this
+    // instead of its own hardcoded default when present, so changing the
+    // setting actually takes effect for new accounts.
+    var withSettings = Object.assign({ mountRoot: root.setting("mountRoot", "~/ProtonDrive") }, payload)
+    loginProcess.payload = JSON.stringify(withSettings)
     loginProcess.command = ["python3", root.pluginDir + "bin/protondrive-accountctl", "add", "--json"]
     loginProcess.running = true
   }
