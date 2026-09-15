@@ -15,15 +15,18 @@ back to prompts when not given as arguments, so the bare `add` the GUI
 button runs (no arguments — it can't collect text input yet, see PLAN.md
 Phase 4) works standalone in a terminal instead of exiting immediately.
 
-Credentials are prompted for *by this script*, not by rclone: `rclone
-config create` only prompts interactively via the classic `rclone config`
-wizard. Given explicit key=value arguments (which is what a script has to
-do) it silently fills any question it would have asked — including
-required, no-default fields like username/password — with their defaults
-and exits 0. So after creating the remote this always re-checks with
-`rclone about` before calling it a success; a stub config with empty
-credentials fails that check as it should, instead of reporting "Signed
-in" for a login that never happened.
+Credentials are prompted for *by this script*, not typed at a `rclone
+config create` shown to the user. Getting them into rclone without putting
+them on that subprocess's command line (visible to any other process on the
+system via /proc/<pid>/cmdline for as long as it runs) takes driving
+`rclone config create`'s actual interactive wizard through a pseudo
+terminal instead of its usual `key=value` arguments -- see `_create_remote`
+for why every other approach rclone offers still ends up with a secret on
+argv. That wizard only collects and obscures fields locally, though; it
+never contacts Proton's API, so after creating the remote this always
+re-checks with `rclone about` before calling it a success -- a stub config
+with a wrong password fails that check as it should, instead of reporting
+"Signed in" for a login that never happened.
 
 Every write to accounts.json goes through atomic_write_accounts: write to a
 sibling temp file, then os.replace over the target, and refuse a target that
@@ -36,9 +39,13 @@ import argparse
 import getpass
 import json
 import os
+import pty
+import re
+import select
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 STATE_HOME = Path.home() / ".config" / "omarchy-protondrive"
@@ -145,6 +152,155 @@ def friendly_error(detail):
     return None
 
 
+def _create_remote(rclone, account_id, config_path, username, password, twofa, mailbox_password):
+    """Create the rclone remote by driving `rclone config create <id>
+    protondrive --all` through a pseudo terminal, instead of passing
+    username/password/2fa/mailbox_password as command-line arguments.
+
+    Why not argv: those values would sit in this subprocess's argv for its
+    whole run, readable by any other process on the system (as this user)
+    via /proc/<pid>/cmdline or `ps` — flagged in marketplace review. rclone
+    itself offers no non-argv alternative for a *new* remote's fields:
+    `--non-interactive` only surfaces backend-specific post-config questions
+    (OAuth-style flows) as JSON, not ordinary required fields, which it
+    silently defaults instead of asking; its `--continue --result <value>`
+    answer-protocol still puts the answer on argv; and neither
+    `RCLONE_CONFIG_<name>_<key>` nor the backend's own `RCLONE_PROTONDRIVE_*`
+    environment variables are read while creating a remote (checked
+    empirically against rclone v1.75.1 -- both are for overriding options on
+    an *existing* remote at operation time). A real terminal reading a
+    password is the only channel rclone actually treats differently, so
+    this drives one via Python's stdlib pty module.
+
+    `config create` here only collects and obscures fields into the config
+    file; it never contacts Proton's API (that's the separate, unchanged
+    `rclone about` call right after this) -- so there's no live-auth prompt
+    variability to handle, just this backend's fixed local wizard, mapped
+    by running it for real (see the plugin's dev notes) for every
+    username/password/2FA/mailbox-password combination this plugin sends.
+
+    Returns (ok, detail). detail is empty on success; on failure it's a
+    short, sanitized diagnostic -- the wizard's own transcript with the
+    sent username and 2FA code (the two fields a pty echoes back) redacted.
+    Password and mailbox password are never echoed by rclone's own masked
+    prompt, confirmed empirically. Never raises; always reaps the child.
+    """
+    TIMEOUT_SECONDS = 20  # local-only, no network call; generous headroom
+    MAX_OUTPUT_BYTES = 200_000  # guards against a future rclone version's
+                                 # wizard asking something this doesn't
+                                 # recognize and looping instead of exiting
+
+    master, slave = pty.openpty()
+    try:
+        proc = subprocess.Popen(
+            [rclone, "config", "create", account_id, "protondrive",
+             "--config", str(config_path), "--all"],
+            stdin=slave, stdout=slave, stderr=slave, close_fds=True,
+        )
+    except OSError as exc:
+        os.close(master)
+        os.close(slave)
+        return False, f"could not start rclone: {exc}"
+    os.close(slave)
+
+    buf = ""
+    total_out = 0
+    cur_field = None
+    stage = 0
+    advanced_offered = False
+    start = time.monotonic()
+
+    def send(text):
+        nonlocal buf
+        os.write(master, (text + "\n").encode())
+        buf = ""
+
+    while True:
+        if time.monotonic() - start > TIMEOUT_SECONDS:
+            break
+        try:
+            ready, _, _ = select.select([master], [], [], 0.5)
+        except OSError:
+            break
+        if master in ready:
+            try:
+                chunk = os.read(master, 4096)
+            except OSError:
+                chunk = b""
+            if not chunk:
+                break
+            buf += chunk.decode(errors="replace")
+            total_out += len(chunk)
+            if total_out > MAX_OUTPUT_BYTES:
+                break
+        if proc.poll() is not None:
+            break
+
+        match = re.search(r"Option (\w+)\.", buf)
+        if match and match.group(1) != cur_field:
+            cur_field = match.group(1)
+            stage = 0
+        tail = buf.rstrip()
+
+        if cur_field == "username" and tail.endswith("username>"):
+            send(username)
+        elif cur_field == "password":
+            if stage == 0 and tail.endswith("y/g>"):
+                stage = 1
+                send("y")
+            elif stage == 1 and tail.endswith("password:") and "Confirm" not in buf:
+                stage = 2
+                send(password)
+            elif stage == 2 and "Confirm" in buf and tail.endswith("password:"):
+                stage = 3
+                send(password)
+        elif cur_field == "2fa" and tail.endswith("2fa>"):
+            send(twofa or "")
+        elif cur_field == "otp_secret_key" and tail.endswith("y/g/n>"):
+            send("n")  # not a setting this plugin exposes
+        elif cur_field == "mailbox_password":
+            if stage == 0 and tail.endswith("y/g/n>"):
+                stage = 1
+                send("y" if mailbox_password else "n")
+            elif mailbox_password and stage == 1 and tail.endswith("password:") and "Confirm" not in buf:
+                stage = 2
+                send(mailbox_password)
+            elif mailbox_password and stage == 2 and "Confirm" in buf and tail.endswith("password:"):
+                stage = 3
+                send(mailbox_password)
+        elif "Edit advanced config?" in buf and tail.endswith("y/n>"):
+            # mailbox_password only exists under "advanced"; enter it once
+            # if needed, decline every later pass so this always terminates
+            # (the wizard re-offers advanced config after each full walk).
+            want_advanced = bool(mailbox_password) and not advanced_offered
+            advanced_offered = True
+            send("y" if want_advanced else "n")
+        elif cur_field and tail.endswith(f"{cur_field}>"):
+            send("")  # any other field (encoding, app_version, ...): default
+
+    try:
+        os.close(master)
+    except OSError:
+        pass
+    if proc.poll() is None:
+        proc.kill()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+
+    if proc.returncode == 0:
+        return True, ""
+
+    detail = buf[-2000:]
+    if username:
+        detail = detail.replace(username, "[username]")
+    if twofa:
+        detail = detail.replace(twofa, "[2fa]")
+    return False, detail.strip() or f"rclone config wizard failed (exit {proc.returncode})"
+
+
 def perform_add(rclone, account_id, display_name, username, password, twofa, mailbox_password, mount_root=None):
     """The actual create+verify+register, shared by the interactive prompt
     flow and --json (used by Panel.qml's login form — see Service.qml).
@@ -177,32 +333,19 @@ def perform_add(rclone, account_id, display_name, username, password, twofa, mai
     mount_path.mkdir(parents=True, exist_ok=True)
     config_path = account_dir / "rclone.conf"
 
-    create_args = [
-        rclone, "config", "create", account_id, "protondrive",
-        "--config", str(config_path),
-        "--obscure",
-        f"username={username}",
-        f"password={password}",
-    ]
-    if twofa:
-        create_args += [f"2fa={twofa}"]
-    if mailbox_password:
-        create_args += [f"mailbox_password={mailbox_password}"]
-
-    # Discard rclone's own stdout/stderr here: on success it's a config dump
-    # that would otherwise echo the credentials/obscured password back to
-    # the terminal, and on failure the rclone about check below produces a
-    # clearer message anyway. Every rclone call from here down is wrapped —
-    # a bad password can make `rclone about` hang for the full timeout
-    # instead of failing fast, and an uncaught TimeoutExpired would both
-    # crash with a raw traceback and skip the rollback below, leaving an
-    # orphaned ~/.config/omarchy-protondrive/<id>/ with a dead rclone.conf
-    # in it. Both actually happened while testing this.
+    # Every rclone call from here down is wrapped — a bad password can make
+    # `rclone about` hang for the full timeout instead of failing fast, and
+    # an uncaught TimeoutExpired would both crash with a raw traceback and
+    # skip the rollback below, leaving an orphaned
+    # ~/.config/omarchy-protondrive/<id>/ with a dead rclone.conf in it.
+    # Both actually happened while testing this.
     verify_ok = False
     verify_detail = ""
     try:
-        create_result = subprocess.run(create_args, capture_output=True, text=True, timeout=60)
-        if create_result.returncode == 0:
+        create_ok, create_detail = _create_remote(
+            rclone, account_id, config_path, username, password, twofa, mailbox_password,
+        )
+        if create_ok:
             about = subprocess.run(
                 [rclone, "about", f"{account_id}:", "--config", str(config_path), "--json"],
                 capture_output=True, text=True, timeout=30,
@@ -210,7 +353,7 @@ def perform_add(rclone, account_id, display_name, username, password, twofa, mai
             verify_ok = about.returncode == 0
             verify_detail = (about.stderr or about.stdout or "").strip()
         else:
-            verify_detail = (create_result.stderr or create_result.stdout or "").strip()
+            verify_detail = create_detail
     except subprocess.TimeoutExpired:
         verify_detail = "rclone did not respond in time (wrong password/2FA can cause this)"
 
