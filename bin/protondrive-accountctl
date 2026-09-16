@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -I
 """Manage Proton Drive accounts: add, remove, pause, resume, list.
 
 State lives under ~/.config/omarchy-protondrive/:
@@ -53,6 +53,16 @@ ACCOUNTS_FILE = STATE_HOME / "accounts.json"
 MOUNT_ROOT = Path.home() / "ProtonDrive"
 UNIT_TEMPLATE = "omarchy-protondrive@{id}.service"
 VALID_ID = __import__("re").compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+
+# Resolve/invoke every security-relevant executable from a fixed, trusted
+# set of directories rather than whatever PATH this process happened to
+# inherit (Quickshell's omarchy-shell, or a terminal session) -- flagged in
+# marketplace review: a user-writable earlier PATH entry (or anything else
+# already running as this user) could otherwise substitute rclone or
+# systemctl and capture this script's credentials/actions. Matches the
+# sibling omarchy-google-drives plugin's already-reviewed pattern.
+TRUSTED_PATH = "/usr/bin:/usr/local/bin"
+SYSTEMCTL = "/usr/bin/systemctl"
 
 
 def fail(message):
@@ -458,7 +468,7 @@ def cmd_remove(args):
         fail(f"no such account: {args.id}")
 
     unit = UNIT_TEMPLATE.format(id=args.id)
-    subprocess.call(["systemctl", "--user", "disable", "--now", unit],
+    subprocess.call([SYSTEMCTL, "--user", "disable", "--now", unit],
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     remaining = [a for a in accounts if a.get("id") != args.id]
@@ -483,7 +493,7 @@ def _control(args, action, unit_state):
     if not entry:
         fail(f"no such account: {args.id}")
     unit = UNIT_TEMPLATE.format(id=args.id)
-    exit_code = subprocess.call(["systemctl", "--user", action, "--now", unit])
+    exit_code = subprocess.call([SYSTEMCTL, "--user", action, "--now", unit])
     if exit_code != 0:
         fail(f"systemctl --user {action} --now {unit} failed (exit {exit_code})")
     print(f"{args.id}: {unit_state}")
@@ -498,7 +508,7 @@ def cmd_resume(args):
 
 
 def _require_rclone():
-    rclone = shutil.which("rclone")
+    rclone = shutil.which("rclone", path=TRUSTED_PATH)
     if not rclone:
         fail("rclone is not installed — run the install script first")
     return rclone

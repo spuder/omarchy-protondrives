@@ -64,6 +64,57 @@ Item {
 
   readonly property int refreshIntervalSec: intSetting("refreshIntervalSec", 30, 5, 600)
 
+  // Absolute, trusted path rather than a bare "python3" resolved through
+  // whatever PATH this shell process happened to inherit -- this Item is
+  // instantiated by the long-lived omarchy-shell process, so pinning where
+  // its child processes come from matters the same way it does for the
+  // systemd-launched mount (see bin/protondrive-mount's own comment).
+  // Flagged in marketplace review. "-I" (isolated mode) additionally makes
+  // the interpreter ignore PYTHONPATH/PYTHONHOME/user site-packages and
+  // inherited *.pth files -- an absolute path alone still lets inherited
+  // Python/loader environment variables influence what runs at startup,
+  // which -I closes off. The launched processes also run under
+  // clearEnvironment (see below), so the executable's own identity and its
+  // environment are both pinned. Matches the sibling omarchy-google-drives
+  // plugin's already-reviewed pattern.
+  readonly property string python3: "/usr/bin/python3"
+  readonly property string trustedPath: "/usr/bin:/usr/local/bin"
+
+  // Every python3 Process below runs with clearEnvironment: true -- the
+  // environment isn't just PATH-restricted, it's rebuilt from nothing and
+  // only these four passed through: PATH to our own trusted value (never
+  // the system/session one), and HOME/XDG_RUNTIME_DIR/
+  // DBUS_SESSION_BUS_ADDRESS (null = "pass the system value through", per
+  // Quickshell's clearEnvironment semantics) because protondrive-status/
+  // -accountctl need them (Path.home(), and systemctl --user's session
+  // addressing) and none of the three are secret -- they're
+  // session-location info any process in this login session already has.
+  // Everything else (LD_PRELOAD, PYTHONPATH, etc.) is simply absent
+  // rather than inherited.
+  readonly property var minimalEnvironment: ({
+    PATH: root.trustedPath,
+    HOME: null,
+    XDG_RUNTIME_DIR: null,
+    DBUS_SESSION_BUS_ADDRESS: null
+  })
+
+  // Wider allowlist for openMountFolder's GUI launch below -- a real
+  // desktop app needs more than the three session-location variables
+  // above to actually display itself. Verified directly on this machine
+  // (same one the sibling omarchy-google-drives plugin's identical
+  // allowlist was verified on): ran uwsm-app/nautilus under exactly this
+  // allowlist and confirmed the file manager opened successfully.
+  readonly property var desktopEnvironment: ({
+    PATH: root.trustedPath,
+    HOME: null,
+    XDG_RUNTIME_DIR: null,
+    DBUS_SESSION_BUS_ADDRESS: null,
+    WAYLAND_DISPLAY: null,
+    XDG_CURRENT_DESKTOP: null,
+    XDG_DATA_DIRS: null,
+    XDG_CONFIG_DIRS: null
+  })
+
   property string _statusOutput: ""
   property string _statusError: ""
   property string _controlOutput: ""
@@ -91,7 +142,7 @@ Item {
     if (statusProcess.running) return
     _statusOutput = ""
     _statusError = ""
-    statusProcess.command = ["python3", root.pluginDir + "bin/protondrive-status"]
+    statusProcess.command = [root.python3, "-I", root.pluginDir + "bin/protondrive-status"]
     statusProcess.running = true
   }
 
@@ -131,7 +182,11 @@ Item {
 
   function openMountFolder(account) {
     if (!account || !account.mountPath) return
-    Quickshell.execDetached(["uwsm-app", "--", "nautilus", account.mountPath])
+    Quickshell.execDetached({
+      command: ["/usr/bin/uwsm-app", "--", "/usr/bin/nautilus", account.mountPath],
+      clearEnvironment: true,
+      environment: root.desktopEnvironment
+    })
   }
 
   function beginAddAccount() {
@@ -174,7 +229,7 @@ Item {
     // setting actually takes effect for new accounts.
     var withSettings = Object.assign({ mountRoot: root.setting("mountRoot", "~/ProtonDrive") }, payload)
     loginProcess.payload = JSON.stringify(withSettings)
-    loginProcess.command = ["python3", root.pluginDir + "bin/protondrive-accountctl", "add", "--json"]
+    loginProcess.command = [root.python3, "-I", root.pluginDir + "bin/protondrive-accountctl", "add", "--json"]
     loginProcess.running = true
   }
 
@@ -186,7 +241,7 @@ Item {
     // _desiredActive override instead of leaving the toggle stuck showing
     // a state that was never actually reached.
     controlProcess.accountId = command.length > 1 ? command[1] : ""
-    controlProcess.command = ["python3", root.pluginDir + "bin/protondrive-accountctl"].concat(command)
+    controlProcess.command = [root.python3, "-I", root.pluginDir + "bin/protondrive-accountctl"].concat(command)
     controlProcess.running = true
   }
 
@@ -217,6 +272,8 @@ Item {
     id: statusProcess
     running: false
     command: []
+    clearEnvironment: true
+    environment: root.minimalEnvironment
     stdout: StdioCollector { id: statusStdout; waitForEnd: true; onStreamFinished: root._statusOutput = text }
     stderr: StdioCollector { id: statusStderr; waitForEnd: true; onStreamFinished: root._statusError = text }
     onExited: function(exitCode) {
@@ -231,6 +288,8 @@ Item {
     id: loginProcess
     running: false
     command: []
+    clearEnvironment: true
+    environment: root.minimalEnvironment
     property string payload: ""
     stdinEnabled: true
     onStarted: {
@@ -267,6 +326,8 @@ Item {
     id: controlProcess
     running: false
     command: []
+    clearEnvironment: true
+    environment: root.minimalEnvironment
     property string accountId: ""
     stdout: StdioCollector { id: controlStdout; waitForEnd: true; onStreamFinished: root._controlOutput = text }
     stderr: StdioCollector { id: controlStderr; waitForEnd: true; onStreamFinished: root._controlError = text }
