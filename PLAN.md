@@ -266,3 +266,29 @@ validate` passing. Done.
   permissions. Routing the config password through `libsecret`/
   `gnome-keyring` via `rclone`'s `--password-command` is a Phase 2/3 item,
   not yet done.
+
+## Security audit — 2026-09-15
+
+Pre-submission self-review using the `omarchy-plugin-security-review`
+skill (trust-boundary mapping, command/argument safety, credential and
+local-data storage, network access, privilege/service/package changes,
+dependency/release supply chain). Complements, and does not replace,
+Marketplace validation, the Automated Security Baseline, or maintainer
+review.
+
+| Severity | Location | Data or control path | Impact | Verification |
+| --- | --- | --- | --- | --- |
+| Medium (fixed in #11) | `bin/protondrive-accountctl`, `perform_add` (pre-#11) | username/password/2FA/mailbox-password on `rclone config create`'s argv | Visible to any other process as this user via `/proc/<pid>/cmdline` for the life of the call | `rclone config create` now driven through a pty; verified leak-free by scanning every live `rclone` process's actual `/proc/<pid>/cmdline` during an end-to-end `add --json` run (7 processes observed, 0 leaks) |
+| Low (fixed here) | `bin/protondrive-accountctl`, `perform_add`/`_create_remote` | `display_name`/`mount_root` → a line in `~/.config/omarchy-protondrive/<id>/env`; `username`/`twofa` → a raw line sent to the pty wizard | Same-user only. An embedded newline injects an extra `KEY=VALUE` line into the mount unit's environment, or lets one field's value overwrite a later prompt's answer in the wizard's fixed sequence | Added `_has_control_chars()` (NUL/CR/LF), applied to all four fields; confirmed a crafted payload is rejected and the 4 legitimate credential-combination cases from #11 still succeed |
+| Low (fixed here) | `bin/protondrive-status`, `save_cache` | `quota-cache.json` written with the process's default umask (0644 observed live) instead of the 0600 every other state file in the same directory uses | Same-user only — the per-account directory is already `0700`, so this was defense-in-depth, not a live cross-user exposure, for usage/activity metadata | `os.chmod(tmp, 0o600)` before the atomic rename; confirmed 0600 in isolation |
+| Informational, not fixed | `bin/protondrive-status`, `account_status`/`load_accounts` | `accounts.json` entries aren't re-validated against `VALID_ID` on read (only enforced at write time in `protondrive-accountctl`) | Would require the same user (or root) to have already directly edited a 0600 file in a 0700 directory — already fully-trusted access under this plugin's stated threat model (`accountctl`'s own module docstring: "this directory is trusted") | Not tested further; noted as residual risk, not a new boundary |
+
+### Record
+
+- Audited and fixed at commit `e44267d9bb301045c2017fd8c3e04b51085fc652` (repository `spuder/omarchy-protondrives`, branch `security/self-review-fixes`)
+- Commands and tests run: `omarchy-plugin-validate .` (pass), `git grep` sweeps for `eval`/`sudo`/`pkexec`/`doas`, `sh -c`/`bash -c`/`Process`/`command:`, and `curl`/`wget`/`git clone`/package-manager calls (all clean or already-reviewed), `bash -n` on every shell script (pass), `python3 -m compileall bin/` (pass), `node test/model.test.js` (8/8), live `/proc/<pid>/cmdline` monitoring across a full `add --json` run, direct exercise of `_create_remote()`/`save_cache()` for all argument combinations
+- Tests not run: `shellcheck`, `qmllint` — neither is installed on the machine this review ran on
+- Fixed findings and their regression tests: see table above; each has an inline verification step, no dedicated automated regression test added to `test/` (the affected functions are `_create_remote`/`_has_control_chars`/`save_cache`, none currently unit-tested — `test/model.test.js` only covers `Model.js`)
+- Remaining non-blocking capabilities: `systemctl --user` service management (enable/disable/start/stop, scoped to this plugin's own unit template and account IDs already validated against `VALID_ID`); local subprocess execution of `rclone` and `systemctl` via fixed argument arrays, never a shell; `install.sh`/`uninstall.sh` write to `~/.local/bin`, `~/.config/systemd/user`, and call `omarchy-pkg-add` (Omarchy's own package-install wrapper)
+- Residual risk and untested areas: no live Proton Drive account was exercised in this review (all wizard/argv tests used fake credentials that fail the real `rclone about` verification, by design); `accounts.json` is trusted-input to `protondrive-status` per the codebase's existing threat model (see Informational row above); no CI or dependency-pinning review applies — this repo has no lockfile, no GitHub Actions, and no vendored/bundled binaries, only OS-packaged `rclone`/`fuse3`/`nautilus-python` via `omarchy-pkg-add`
+- Final decision: **READY FOR SUBMISSION** at commit `e44267d9bb301045c2017fd8c3e04b51085fc652`, once merged to `main`

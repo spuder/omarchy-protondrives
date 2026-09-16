@@ -31,6 +31,7 @@ panel's layout before any account is actually configured.
 
 import configparser
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -145,6 +146,9 @@ def save_cache(account_id, data):
     path = cache_path(account_id)
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(data), encoding="utf-8")
+    os.chmod(tmp, 0o600)  # usage/activity metadata, same as accountctl's other
+                          # state files -- the parent dir is already 0700, but
+                          # this shouldn't depend only on that holding true
     tmp.replace(path)  # same directory, so this is an atomic rename like accountctl's writes
 
 
