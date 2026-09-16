@@ -4,22 +4,66 @@
 # Leaves ~/.config/omarchy-protondrive (accounts, rclone configs) and any
 # synced files under ~/ProtonDrive untouched — remove those yourself once
 # you've confirmed you don't need them.
-set -euo pipefail
 
-if command -v protondrive-accountctl >/dev/null 2>&1; then
-  while IFS=$'\t' read -r id _rest; do
-    [[ -n $id ]] || continue
-    systemctl --user disable --now "omarchy-protondrive@${id}.service" 2>/dev/null || true
-  done < <(protondrive-accountctl list 2>/dev/null | grep -v '^No accounts' || true)
+# Same closed-environment re-exec as install.sh, and for the same reason:
+# nothing here crosses a privilege boundary the way omarchy-pkg-add does,
+# but omarchy-plugin-disable and systemctl are still resolved by bare name
+# below, so they get the same trusted, pinned PATH rather than whatever
+# the caller's shell had.
+# See install.sh's matching comment: XDG_RUNTIME_DIR/DBUS_SESSION_BUS_ADDRESS
+# are required for `systemctl --user` below, and OMARCHY_PATH for
+# omarchy-plugin-disable (it shells out to omarchy-shell, which refuses to
+# run without it).
+if [[ -z "${PROTONDRIVE_INSTALL_REEXECED:-}" ]]; then
+  exec /usr/bin/env -i \
+    PROTONDRIVE_INSTALL_REEXECED=1 \
+    HOME="$HOME" \
+    XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+    DBUS_SESSION_BUS_ADDRESS="$DBUS_SESSION_BUS_ADDRESS" \
+    OMARCHY_PATH="/usr/share/omarchy" \
+    PATH="/usr/bin:/usr/local/bin:/usr/share/omarchy/bin" \
+    /usr/bin/bash "$0" "$@"
 fi
 
-omarchy-plugin-disable spuder.protondrive || true
+set -euo pipefail
+cd "$(dirname "${BASH_SOURCE[0]}")"
+PLUGIN_DIR="$(pwd)"
 
-rm -f "$HOME/.local/bin/protondrive-status" \
-      "$HOME/.local/bin/protondrive-accountctl" \
-      "$HOME/.local/bin/protondrive-mount" \
-      "$HOME/.config/systemd/user/omarchy-protondrive@.service"
-systemctl --user daemon-reload
+READLINK=/usr/bin/readlink
+RM=/usr/bin/rm
+SYSTEMCTL=/usr/bin/systemctl
+PYTHON3=/usr/bin/python3
+OMARCHY_PLUGIN_DISABLE=/usr/share/omarchy/bin/omarchy-plugin-disable
+# Called by its own absolute, plugin-owned path — not the ~/.local/bin
+# symlink install.sh makes, which this script is about to remove and which
+# PATH no longer includes here on purpose (see the re-exec above).
+ACCOUNTCTL="$PLUGIN_DIR/bin/protondrive-accountctl"
+
+if [[ -x "$ACCOUNTCTL" ]]; then
+  while IFS=$'\t' read -r id _rest; do
+    [[ -n $id ]] || continue
+    "$SYSTEMCTL" --user disable --now "omarchy-protondrive@${id}.service" 2>/dev/null || true
+  done < <("$PYTHON3" -I "$ACCOUNTCTL" list 2>/dev/null | grep -v '^No accounts' || true)
+fi
+
+"$OMARCHY_PLUGIN_DISABLE" spuder.protondrive || true
+
+# Only remove a ~/.local/bin entry if it's still the symlink install.sh
+# made, pointing back into this exact plugin directory — install.sh
+# already refuses to overwrite anything it didn't create, so mirror that
+# here: never delete a file this plugin didn't put there.
+unlink_if_ours() {  # unlink_if_ours <name>
+  local name="$1"
+  local source="$PLUGIN_DIR/bin/$name" dest="$HOME/.local/bin/$name"
+  [[ -L "$dest" ]] || return 0
+  [[ "$("$READLINK" -f -- "$dest" 2>/dev/null)" == "$("$READLINK" -f -- "$source" 2>/dev/null)" ]] || return 0
+  "$RM" -f "$dest"
+}
+
+unlink_if_ours protondrive-status
+unlink_if_ours protondrive-accountctl
+"$RM" -f "$HOME/.config/systemd/user/omarchy-protondrive@.service"
+"$SYSTEMCTL" --user daemon-reload
 
 echo "Uninstalled. Your accounts and synced files were left in place:"
 echo "  ~/.config/omarchy-protondrive"

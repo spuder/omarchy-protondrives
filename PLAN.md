@@ -292,3 +292,55 @@ review.
 - Remaining non-blocking capabilities: `systemctl --user` service management (enable/disable/start/stop, scoped to this plugin's own unit template and account IDs already validated against `VALID_ID`); local subprocess execution of `rclone` and `systemctl` via fixed argument arrays, never a shell; `install.sh`/`uninstall.sh` write to `~/.local/bin`, `~/.config/systemd/user`, and call `omarchy-pkg-add` (Omarchy's own package-install wrapper)
 - Residual risk and untested areas: no live Proton Drive account was exercised in this review (all wizard/argv tests used fake credentials that fail the real `rclone about` verification, by design); `accounts.json` is trusted-input to `protondrive-status` per the codebase's existing threat model (see Informational row above); no CI or dependency-pinning review applies — this repo has no lockfile, no GitHub Actions, and no vendored/bundled binaries, only OS-packaged `rclone`/`fuse3`/`nautilus-python` via `omarchy-pkg-add`
 - Final decision: **READY FOR SUBMISSION** at commit `e44267d9bb301045c2017fd8c3e04b51085fc652`, once merged to `main`
+
+## Security audit addendum — 2026-09-16
+
+Marketplace review at `5f0f71a058a9549181859a90aa91d9ecbd5f03af` (the
+2026-09-15 audit's commit) found what that self-review missed: `Service.qml`
+launched `python3` by bare name with the shell's full inherited
+environment, and `protondrive-accountctl`/`protondrive-status` resolved
+`rclone`/`systemctl` through the inherited `PATH` rather than a trusted
+fixed set of directories. A user-writable or already-compromised earlier
+`PATH` entry could substitute either executable and capture the Proton
+credentials sent to it over the pty (added in #11) despite them never
+touching argv. Correctly scoped as a real gap in the prior audit: "Use
+absolute paths for privileged executables and reject unexpected executable
+locations" is an explicit checklist item this repository's own process
+above lists, and it wasn't checked as rigorously as the argv-exposure item
+it sits next to.
+
+Fixed by porting the sibling `omarchy-google-drives` plugin's
+already-reviewed pattern for this exact class of issue:
+
+- `Service.qml`: every `Process` (`statusProcess`, `loginProcess`,
+  `controlProcess`) and the `openMountFolder` GUI launch now run with
+  `clearEnvironment: true` and a minimal/desktop environment allowlist
+  (`PATH` pinned to `/usr/bin:/usr/local/bin`, plus only the specific
+  session-location variables each actually needs). `python3` is invoked by
+  absolute path (`/usr/bin/python3`) with `-I` (isolated mode).
+- `bin/protondrive-accountctl`, `bin/protondrive-status`: `#!/usr/bin/python3
+  -I` shebang; `rclone`/`systemctl` resolved via `shutil.which(..., path=
+  "/usr/bin:/usr/local/bin")` / a pinned `SYSTEMCTL` absolute path instead
+  of ambient `PATH`.
+- `bin/protondrive-mount`: `export PATH="/usr/bin:/usr/local/bin"` before
+  resolving `rclone`.
+- `systemd/omarchy-protondrive@.service`: `ExecStart` now points into this
+  plugin's own installed directory instead of a copy in the generic,
+  shared, user-writable `~/.local/bin`.
+- `install.sh`/`uninstall.sh`: re-exec under a closed environment
+  (`env -i` plus a pinned allowlist) before doing anything, named absolute
+  paths for every privilege-crossing or collision-safety-relevant command,
+  and the two CLI helpers are now symlinked (not copied) into
+  `~/.local/bin`, collision-checked against anything already there.
+
+Verified live on this machine, not just in isolation: re-ran `install.sh`
+end to end (correctly refused to overwrite the pre-existing copy-based
+install from before this change until it was removed, then symlinked
+correctly), restarted a real mount unit under the new `ExecStart` path
+(came up healthy, real files listed under the mount), restarted the
+`omarchy-shell` process itself (clean startup, no QML errors for this
+plugin), and called the plugin's own IPC `refresh`/`status` methods
+end-to-end through the newly `clearEnvironment`-restricted `statusProcess`
+(`"All 2 accounts syncing"`). `_create_remote()` and `_require_rclone()`
+re-verified for all argument combinations under the new resolution.
+`node test/model.test.js` still 8/8; `omarchy-plugin-validate .` passes.

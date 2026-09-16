@@ -6,6 +6,14 @@
 # place to live and can be tuned without touching systemd state.
 set -euo pipefail
 
+# Resolve rclone (and mkdir, below) from trusted system directories only,
+# not whatever PATH this unit happened to inherit -- a systemd user unit's
+# environment can be influenced by anything else that ran in the same
+# login session before it, and this is a persistent, auto-restarting
+# process, so pinning where it looks matters more than for a one-shot
+# command a human typed themselves.
+export PATH="/usr/bin:/usr/local/bin"
+
 : "${PROTONDRIVE_REMOTE:?PROTONDRIVE_REMOTE is not set}"
 : "${PROTONDRIVE_MOUNTPOINT:?PROTONDRIVE_MOUNTPOINT is not set}"
 : "${PROTONDRIVE_CONFIG:?PROTONDRIVE_CONFIG is not set}"
