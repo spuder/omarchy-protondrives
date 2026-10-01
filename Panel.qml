@@ -142,6 +142,12 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
+      // PanelKeyCatcher runs at Keys.BeforeItem, so without this it eats
+      // j/k/h/l/x/Space/Tab/Enter/Esc and fires r/a/o shortcuts while the
+      // user is typing into the sign-in form. Same pattern as the network
+      // panel's inline password prompt; the form's own fields handle
+      // Tab/Enter/Esc while it's open.
+      blocked: proton.loginFormOpen
       onMoveRequested: function(dx, dy) {
         if (!root.cursorActive) { root.cursorActive = true; return }
         root.moveCursor(dx, dy)
@@ -355,7 +361,13 @@ Panel {
       })
     }
 
-    onVisibleChanged: if (visible) Qt.callLater(function() { idField.forceActiveFocus() })
+    // LoginField is a layout, not a FocusScope, so focus has to go to the
+    // TextField inside it. Hand focus back to the key catcher on close so
+    // panel navigation works again.
+    onVisibleChanged: Qt.callLater(function() {
+      if (visible) idField.input.forceActiveFocus()
+      else keyCatcher.forceActiveFocus()
+    })
 
     PanelSectionHeader {
       text: "SIGN IN"
@@ -369,7 +381,7 @@ Panel {
       text: proton.formId
       onTextEdited: proton.formId = text
       onAccepted: loginForm.submit()
-      KeyNavigation.tab: displayNameField
+      nextItem: displayNameField.input
     }
     LoginField {
       id: displayNameField
@@ -377,7 +389,7 @@ Panel {
       text: proton.formDisplayName
       onTextEdited: proton.formDisplayName = text
       onAccepted: loginForm.submit()
-      KeyNavigation.tab: usernameField
+      nextItem: usernameField.input
     }
     LoginField {
       id: usernameField
@@ -385,7 +397,7 @@ Panel {
       text: proton.formUsername
       onTextEdited: proton.formUsername = text
       onAccepted: loginForm.submit()
-      KeyNavigation.tab: passwordField
+      nextItem: passwordField.input
     }
     LoginField {
       id: passwordField
@@ -394,7 +406,7 @@ Panel {
       password: true
       onTextEdited: proton.formPassword = text
       onAccepted: loginForm.submit()
-      KeyNavigation.tab: twofaCheck
+      nextItem: twofaCheck
     }
 
     RowLayout {
@@ -404,7 +416,8 @@ Panel {
         id: twofaCheck
         checked: proton.formHas2fa
         onToggled: proton.formHas2fa = checked
-        KeyNavigation.tab: mailboxCheck
+        KeyNavigation.tab: proton.formHas2fa ? twofaField.input : mailboxCheck
+        Keys.onEscapePressed: proton.cancelLogin()
       }
       Text {
         text: "Two-factor authentication enabled"
@@ -414,11 +427,13 @@ Panel {
       }
     }
     LoginField {
+      id: twofaField
       label: "2FA code"
       visible: proton.formHas2fa
       text: proton.form2fa
       onTextEdited: proton.form2fa = text
       onAccepted: loginForm.submit()
+      nextItem: mailboxCheck
     }
 
     RowLayout {
@@ -428,6 +443,8 @@ Panel {
         id: mailboxCheck
         checked: proton.formHasMailboxPassword
         onToggled: proton.formHasMailboxPassword = checked
+        KeyNavigation.tab: proton.formHasMailboxPassword ? mailboxField.input : idField.input
+        Keys.onEscapePressed: proton.cancelLogin()
       }
       Text {
         text: "Separate mailbox password (old accounts only)"
@@ -439,12 +456,14 @@ Panel {
       }
     }
     LoginField {
+      id: mailboxField
       label: "Mailbox password"
       visible: proton.formHasMailboxPassword
       text: proton.formMailboxPassword
       password: true
       onTextEdited: proton.formMailboxPassword = text
       onAccepted: loginForm.submit()
+      nextItem: idField.input
     }
 
     Text {
@@ -505,6 +524,10 @@ Panel {
     property alias label: labelText.text
     property alias text: input.text
     property bool password: false
+    // Tab target. Set on the inner TextField, since KeyNavigation on this
+    // layout never fires (the TextField holds focus, not the layout).
+    property Item nextItem: null
+    readonly property alias input: input
     signal textEdited()
     signal accepted()
 
@@ -526,6 +549,9 @@ Panel {
       font.pixelSize: Style.font.body
       onTextChanged: fieldRoot.textEdited()
       Keys.onReturnPressed: fieldRoot.accepted()
+      Keys.onEnterPressed: fieldRoot.accepted()
+      Keys.onEscapePressed: proton.cancelLogin()
+      KeyNavigation.tab: fieldRoot.nextItem
     }
   }
 

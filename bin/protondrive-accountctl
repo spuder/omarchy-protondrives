@@ -342,9 +342,13 @@ def perform_add(rclone, account_id, display_name, username, password, twofa, mai
     # pathlib's / silently discards MOUNT_ROOT entirely when the right side
     # is an absolute path, so an unchecked display_name like "/etc" would
     # send the mount somewhere other than under ~/ProtonDrive. "/" has no
-    # legitimate use in a display name anyway.
+    # legitimate use in a display name anyway. "." and ".." (and "") don't
+    # need a "/" to escape: they resolve to the mount root itself (shadowing
+    # every other account's mountpoint) or to its parent (e.g. ~).
     if "/" in display_name or _has_control_chars(display_name):
         return False, "display name can't contain '/' or a newline"
+    if display_name in ("", ".", ".."):
+        return False, "display name can't be empty, '.' or '..'"
     if mount_root and _has_control_chars(mount_root):
         return False, "mount root can't contain a newline"
 
