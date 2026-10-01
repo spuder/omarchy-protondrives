@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "spuder.protondrive",
   "name": "Proton Drives",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": "Spencer Owen",
   "license": "MIT",
   "description": "Native Proton Drive sync for multiple accounts: bar status, storage usage, and pause/resume, backed by rclone mounts.",
