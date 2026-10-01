@@ -7,11 +7,22 @@ Prints one JSON object on stdout, shaped for Model.js's parseAccounts():
 
 Each account comes from ~/.config/omarchy-protondrive/accounts.json (written
 by protondrive-accountctl) plus two checks: whether its systemd user unit is
-active (-> "active" — cheap and local, so this always runs fresh), and
-whether `rclone about` succeeds against its own per-account config (->
-"authenticated", plus usage/quota when it does).
+active (-> "active" — cheap and local, so this always runs fresh), and a
+quota/auth check (-> "authenticated", plus usage/quota when it does). That
+second check uses one of two sources, never both at once for the same
+account:
 
-The `rclone about` check is cached per account (see CACHE_TTL_SECONDS): the
+  - active (mounted): a readdir health check plus statfs on the live mount
+    path, piggybacking on the mount daemon's already-authenticated session
+    instead of starting a second one. See mount_quota's docstring — running
+    a second, independent `rclone about` process against the same
+    rclone.conf while the mount is live is what used to intermittently
+    break these mounts (Proton rotates refresh tokens on every use, so two
+    processes refreshing independently race to invalidate each other).
+  - not active (paused / never mounted yet): a direct `rclone about` call,
+    since there's no competing process to race against.
+
+Either way, the result is cached per account (see CACHE_TTL_SECONDS): the
 panel refreshes every ~30s by default, and Proton Drive's API is
 reverse-engineered rather than official (see PLAN.md), so polling it live
 on every refresh — for every account — isn't something to do by accident.
@@ -48,6 +59,8 @@ CACHE_TTL_SECONDS = 600
 # directories rather than whatever PATH this process happened to inherit.
 TRUSTED_PATH = "/usr/bin:/usr/local/bin"
 SYSTEMCTL = "/usr/bin/systemctl"
+FINDMNT = "/usr/bin/findmnt"
+STAT = "/usr/bin/stat"
 
 
 def demo_payload():
@@ -158,6 +171,104 @@ def save_cache(account_id, data):
     tmp.replace(path)  # same directory, so this is an atomic rename like accountctl's writes
 
 
+def is_rclone_mount(mount_path):
+    """True only if mount_path is *currently* the mountpoint of a live
+    fuse.rclone filesystem -- not just an existing directory. Guards
+    mount_quota below: if the mount has died and mount_path reverted to
+    a plain directory on the host filesystem, `findmnt --target` resolves
+    to the covering host mount (btrfs/ext4/...) instead, whose fstype
+    doesn't start with "fuse.rclone", so we correctly refuse to read it
+    rather than silently reporting the host partition's free space as this
+    account's Proton Drive quota."""
+    exit_code, output = command_output(
+        [FINDMNT, "-no", "FSTYPE", "--target", str(mount_path)], timeout=3,
+    )
+    return exit_code == 0 and output.startswith("fuse.rclone")
+
+
+def mount_is_healthy(mount_path):
+    """True only if a readdir on the live mount actually succeeds -- the
+    same FUSE operation that surfaces as "Input/output error" to a user
+    once the mount daemon's auth session has gone bad. Run as `ls`, not
+    Python's own os.listdir, so a hung (not just erroring) FUSE daemon
+    can't block this script past the timeout -- same discipline as every
+    other external call in this file."""
+    exit_code, _ = command_output(["/usr/bin/ls", "-A", str(mount_path)], timeout=5)
+    return exit_code == 0
+
+
+def mount_quota(mount_path):
+    """Quota for a live mount, piggybacking on rclone mount's own
+    Statfs()->About() call through the mount daemon's already-authenticated
+    session -- instead of running a second, independent `rclone about`
+    process against the same rclone.conf.
+
+    That second process is what breaks these mounts: Proton rotates the
+    refresh token on every use, so when the long-running mount daemon and
+    this status script's periodic `rclone about` both happen to refresh
+    around the same time, whichever writes rclone.conf last invalidates
+    the token the other is still holding in memory. The next refresh from
+    the "loser" -- often the mount daemon itself, since it's typically been
+    running far longer -- gets "Invalid refresh token (Code=10013)" and
+    wedges the whole mount with a sticky de-auth error that every
+    subsequent read surfaces as Input/output error, until the account is
+    fully re-authenticated. Reading through the existing mount's own
+    session instead of starting a competing one removes that race for the
+    common case (an account that's actually mounted).
+
+    Health is checked with mount_is_healthy (an actual readdir) before
+    trusting statfs's numbers, not statfs alone: empirically, rclone mount's
+    Statfs() can return a bogus placeholder (observed: ~1 PiB total, 0
+    used) instead of failing when the backing session is dead, which would
+    otherwise misreport a broken account as fully healthy.
+
+    Returns None (never raises) if the mount isn't responding, isn't
+    actually a live rclone mount, or stat's output doesn't parse --
+    callers should treat that the same as a failed `rclone about`, not
+    fall back to spawning one while the mount is still live, which would
+    just reintroduce the same race."""
+    if not is_rclone_mount(mount_path) or not mount_is_healthy(mount_path):
+        return None
+    exit_code, output = command_output([STAT, "-f", "--format=%b:%f:%S", str(mount_path)], timeout=5)
+    if exit_code != 0:
+        return None
+    try:
+        blocks, free_blocks, block_size = (int(part) for part in output.split(":"))
+    except ValueError:
+        return None
+    total = blocks * block_size
+    free = free_blocks * block_size
+    if total <= 0:
+        return None
+    return {
+        "authenticated": True,
+        "usedBytes": max(total - free, 0),
+        "quotaBytes": total,
+        "quotaKnown": True,
+        "lastError": "",
+        "statusHint": "",
+    }
+
+
+def cached_or_fetch(account_id, fetch):
+    """Shared TTL-cache dance for both quota sources (mount_quota and
+    `rclone about`): a healthy result is trusted for CACHE_TTL_SECONDS, an error is
+    never cached so a lapsed/expired sign-in doesn't stay hidden behind a
+    stale cache. `fetch` is a zero-arg callable returning a quota dict."""
+    cache = load_cache(account_id)
+    fresh_enough = (
+        cache is not None
+        and cache.get("authenticated") is True
+        and not cache.get("lastError")
+        and (time.time() - cache.get("checkedAt", 0)) < CACHE_TTL_SECONDS
+    )
+    if fresh_enough:
+        return cache
+    quota = fetch()
+    save_cache(account_id, dict(quota, checkedAt=time.time()))
+    return quota
+
+
 def fetch_quota(rclone_path, remote, config_path):
     """One live `rclone about` call. Returns a dict with authenticated/
     usedBytes/quotaBytes/quotaKnown/lastError/statusHint — never raises."""
@@ -226,17 +337,28 @@ def account_status(rclone_path, entry):
     # Proton's (reverse-engineered) API on every panel refresh. An error is
     # never cached — always recheck immediately, so an expired sign-in shows
     # up right away instead of waiting out the TTL.
-    cache = load_cache(account_id)
-    fresh_enough = (
-        cache is not None
-        and cache.get("authenticated") is True
-        and not cache.get("lastError")
-        and (time.time() - cache.get("checkedAt", 0)) < CACHE_TTL_SECONDS
-    )
+    #
+    # While active (mounted), read quota through the live mount (statvfs)
+    # instead of spawning a second `rclone about` process against the same
+    # rclone.conf the mount daemon is using — see mount_quota's docstring
+    # for the refresh-token-rotation race that running both causes. Only
+    # fall back to a direct `rclone about` call when nothing is mounted, so
+    # there's no competing process to race against.
+    if active:
+        def do_fetch():
+            quota = mount_quota(mount_path)
+            if quota is not None:
+                return quota
+            return {
+                "authenticated": False, "usedBytes": 0, "quotaBytes": 0, "quotaKnown": False,
+                "lastError": "Mount isn't responding (I/O error) — may need to re-authenticate",
+                "statusHint": "Needs attention",
+            }
+    else:
+        def do_fetch():
+            return fetch_quota(rclone_path, remote, config_path)
 
-    quota = cache if fresh_enough else fetch_quota(rclone_path, remote, config_path)
-    if not fresh_enough:
-        save_cache(account_id, dict(quota, checkedAt=time.time()))
+    quota = cached_or_fetch(account_id, do_fetch)
 
     result["authenticated"] = quota["authenticated"]
     result["usedBytes"] = quota["usedBytes"]
